@@ -1,26 +1,32 @@
 """Catatan hasil scraping per akun ke `public.scheduler_logs`.
 
-Kenapa tabel ini, bukan tabel baru: `scheduler_logs` sudah ada, masih kosong,
-dan kolomnya persis yang dibutuhkan — termasuk `kol_account_id` yang sudah
-ber-foreign key ke `public.kol_directory(id)`. Tidak ada migration yang perlu
-dibuat.
+Kenapa tabel ini, bukan tabel baru: `scheduler_logs` sudah ada dan sudah punya
+`kol_account_id` ber-foreign key ke `public.kol_directory(id)`.
+
+Migration 028 menambahkan tujuh kolom NULLABLE (username, actor,
+profiles_processed, posts_fetched, posts_saved, duplicates_skipped,
+duration_seconds) untuk kebutuhan Scheduler Engine. Tidak ada tabel, schema,
+maupun view logging tambahan: `public.scheduler_logs` adalah satu-satunya
+penyimpanan, jadi riwayat post_pipeline dan riwayat scheduler tidak terpecah ke
+dua tempat. Keduanya dibedakan lewat `job_name`.
 
 Pemetaan kolom:
 
     kol_account_id  -> kol_directory.id (NULL untuk baris ringkasan run)
     platform        -> 'instagram' | 'tiktok'
-    job_name        -> 'post_scrape'
-    category        -> 'post'
+    job_name        -> 'post_scrape' (post_pipeline) | 'scheduled_scrape' (scheduler)
+    category        -> 'post' (post_pipeline & pekerjaan post scheduler)
+                       'profile' (pekerjaan profile scheduler)
     status          -> 'success' atau salah satu kode di post_errors.ERROR_CODES
     error_message   -> keterangan apa adanya dari actor/exception
     records_synced  -> jumlah baris L0 yang masuk untuk akun itu
     run_id          -> satu uuid per eksekusi pipeline
     started_at / finished_at -> rentang waktu
 
-Username tidak punya kolom sendiri di tabel ini, dan memang tidak perlu:
-`kol_account_id` menjamin bisa di-join ke `kol_directory.username`. Untuk baris
-yang tidak punya pasangan directory, username tetap ditulis di depan
-`error_message` supaya tidak hilang.
+Sejak migration 028 username punya kolomnya sendiri dan selalu diisi. Untuk
+baris yang tidak punya pasangan `kol_directory`, username tetap juga ditulis di
+depan `error_message` — perilaku lama dipertahankan supaya baris yang sudah
+pernah ditulis dan yang baru bisa dibaca dengan cara yang sama.
 
 **Koneksi sendiri, commit sendiri.** Ini disengaja. Audit menemukan procedure
 `sp_sync_*` menulis status 'failed' lalu `RAISE`, sehingga tulisannya ikut
@@ -47,11 +53,27 @@ TABLE = "public.scheduler_logs"
 JOB_NAME = "post_scrape"
 CATEGORY = "post"
 
+# Dipakai Scheduler Engine (scheduler_engine.py). Nilai ini yang membedakan
+# baris log scheduler dari baris log post_pipeline di tabel yang sama.
+SCHEDULER_JOB_NAME = "scheduled_scrape"
+
+# Profile dan post adalah dua pekerjaan terpisah dan dicatat sebagai dua baris,
+# walau keduanya bisa berasal dari satu run actor yang sama. Yang menyatukannya
+# adalah `run_id`, bukan barisnya digabung.
+SCHEDULER_CATEGORY_PROFILE = "profile"
+SCHEDULER_CATEGORY_POST = "post"
+
+# Kolom setelah `kol_account_id` ditambahkan migration 028 dan semuanya
+# NULLABLE, jadi pemanggil lama yang tidak mengisinya tetap menghasilkan baris
+# yang sah.
 _INSERT = f"""
     INSERT INTO {TABLE}
         (run_id, job_name, platform, category, status,
-         records_synced, error_message, started_at, finished_at, kol_account_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         records_synced, error_message, started_at, finished_at, kol_account_id,
+         username, actor, profiles_processed, posts_fetched, posts_saved,
+         duplicates_skipped, duration_seconds)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s)
     RETURNING id
 """
 
@@ -89,9 +111,19 @@ class ScrapeLogger:
     bisa dihubungi, log dicatat ke logger Python dan pipeline jalan terus.
     """
 
-    def __init__(self, pg: PostgresConfig, run_id: str | None = None):
+    def __init__(
+        self,
+        pg: PostgresConfig,
+        run_id: str | None = None,
+        job_name: str = JOB_NAME,
+        category: str = CATEGORY,
+    ):
         self._pg = pg
         self.run_id = run_id or str(uuid.uuid4())
+        # Scheduler Engine memakai job_name/category sendiri supaya barisnya
+        # bisa dipisahkan dari baris post_pipeline tanpa tabel terpisah.
+        self._job_name = job_name
+        self._category = category
         self._conn = None
 
     # --- daur hidup koneksi --------------------------------------------------
@@ -133,25 +165,47 @@ class ScrapeLogger:
         message: str | None,
         started_at: datetime | None,
         finished_at: datetime | None,
+        username: str | None = None,
+        actor: str | None = None,
+        profiles_processed: int | None = None,
+        posts_fetched: int | None = None,
+        posts_saved: int | None = None,
+        duplicates_skipped: int | None = None,
+        duration_seconds: float | None = None,
+        category: str | None = None,
     ) -> bool:
         conn = self._connection()
         if conn is None:
             return False
+        mulai = started_at or datetime.now(timezone.utc)
+        selesai = finished_at or datetime.now(timezone.utc)
+        if duration_seconds is None:
+            duration_seconds = round((selesai - mulai).total_seconds(), 3)
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     _INSERT,
                     (
                         self.run_id,
-                        JOB_NAME,
+                        self._job_name,
                         platform,
-                        CATEGORY,
+                        category or self._category,
                         status,
                         records,
                         message,
-                        started_at or datetime.now(timezone.utc),
-                        finished_at or datetime.now(timezone.utc),
+                        mulai,
+                        selesai,
                         kol_directory_id,
+                        username,
+                        actor,
+                        profiles_processed,
+                        posts_fetched,
+                        # posts_saved menggandakan records_synced dengan sengaja:
+                        # kolom lama tetap berarti sama untuk baris post_pipeline,
+                        # kolom baru yang dibaca pembaca log scheduler.
+                        records if posts_saved is None else posts_saved,
+                        duplicates_skipped,
+                        duration_seconds,
                     ),
                 )
                 cur.fetchone()
@@ -178,6 +232,7 @@ class ScrapeLogger:
             message=message,
             started_at=outcome.started_at,
             finished_at=outcome.finished_at,
+            username=outcome.username,
         )
 
     def log_run(
@@ -203,6 +258,53 @@ class ScrapeLogger:
             message=message,
             started_at=started_at,
             finished_at=finished_at,
+        )
+
+    def log_cycle(
+        self,
+        *,
+        category: str,
+        platform: str,
+        status: str,
+        username: str | None,
+        actor: str | None,
+        kol_directory_id: str | None = None,
+        profiles_processed: int = 0,
+        posts_fetched: int = 0,
+        posts_saved: int = 0,
+        duplicates_skipped: int = 0,
+        message: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> bool:
+        """Satu baris untuk satu pekerjaan Scheduler Engine.
+
+        `category` WAJIB diisi: `profile` atau `post`. Satu eksekusi menghasilkan
+        dua baris dengan `run_id` yang sama, sehingga keduanya bisa ditelusuri
+        sebagai satu kesatuan tanpa menggabungkan angkanya.
+
+        Menulis langsung ke `public.scheduler_logs`, termasuk tujuh kolom
+        tambahan dari migration 028. Sengaja TIDAK menggantikan
+        `log_account`/`log_run` yang masih dipakai post_pipeline.
+
+        Mengembalikan True kalau barisnya masuk. Nilai False berarti log gagal
+        ditulis — pemanggil tetap tidak boleh berhenti karenanya.
+        """
+        return self._write(
+            category=category,
+            platform=platform,
+            status=status,
+            kol_directory_id=kol_directory_id,
+            records=posts_saved,
+            message=message,
+            started_at=started_at,
+            finished_at=finished_at,
+            username=username,
+            actor=actor,
+            profiles_processed=profiles_processed,
+            posts_fetched=posts_fetched,
+            posts_saved=posts_saved,
+            duplicates_skipped=duplicates_skipped,
         )
 
     def log_many(self, outcomes) -> LogSummary:

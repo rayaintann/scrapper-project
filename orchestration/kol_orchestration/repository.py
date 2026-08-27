@@ -5,7 +5,7 @@ Di sinilah seluruh asset, job, schedule, sensor, dan resource didaftarkan.
 
 FASE 5 (awal) — L2 Gold pertama, di atas jalur Fase 1b yang sudah lengkap.
 
-Terdaftar sekarang (11 asset):
+Terdaftar sekarang (18 asset):
     l0_harmonization
         instagram_profile        @asset      CALL sp_sync_instagram_profile()
         tiktok_profile           @asset      CALL sp_sync_tiktok_profile()
@@ -30,6 +30,20 @@ Fase 1a sebagai asset eksternal.
 `sp_sync_all()` SENGAJA tidak dipakai — ia membungkus semua anaknya dengan
 EXCEPTION handler sehingga selalu sukses walau anaknya gagal. Keempat pekerja
 harmonization dipanggil langsung supaya kegagalan per tabel terlihat.
+
+JOB ONE-SHOT (bukan asset, TIDAK ada schedule)
+    one_shot_scrape_job    job   BERBIAYA — 1 profil uji dari kol_directory
+                                 + maks 10 post terbaru per target. Jalankan
+                                 MANUAL, sekali. Tanpa retry otomatis.
+    transform_chain_job    job   GRATIS — asset job L0 Harmonization -> L1
+                                 Silver -> Feature -> L2 Gold. Aman diulang.
+
+Tidak ada `ScheduleDefinition` sama sekali: requirement cron 5 menit dibatalkan,
+dan tidak boleh ada jalur yang memanggil actor sendiri.
+
+Job scraping sengaja TIDAK jadi asset: ia memanggil Apify dan ditagih per hasil,
+sedangkan asset di atas semuanya transformasi murah yang boleh diulang. Lihat
+`one_shot.py` untuk alasan lengkapnya.
 
 Rencana berikutnya (lihat rancangan arsitektur):
     Fase 2   cpe
@@ -66,6 +80,7 @@ from kol_orchestration.assets.gold import gold_assets
 from kol_orchestration.assets.gold_profile import gold_profile_assets
 from kol_orchestration.assets.followers import follower_assets
 from kol_orchestration.assets.audience import audience_assets
+from kol_orchestration.one_shot import one_shot_jobs, one_shot_schedules
 
 # .env ada di root project (satu tingkat di atas folder orchestration/).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -115,6 +130,9 @@ defs = Definitions(
         *follower_assets,            # l0_harm + l1: rantai daftar follower
         *audience_assets,            # feature + l2_gold: audiens hasil inferensi
     ],
+    jobs=one_shot_jobs,
+    # Sengaja kosong: tidak ada schedule/cron apa pun di project ini.
+    schedules=one_shot_schedules,
     resources={
         "postgres": PostgresResource(
             connection_string=_build_connection_string(),

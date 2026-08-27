@@ -85,8 +85,13 @@ def insert_profiles(
     scraped_at: datetime,
     scrape_run_id: str | None = None,
     commit: bool = True,
+    account_ids: dict[str, str] | None = None,
 ) -> RawInsertStats:
-    """Masukkan item TikTok ke l0_raw.tt_profile_apify."""
+    """Masukkan item TikTok ke l0_raw.tt_profile_apify.
+
+    `account_ids` (username -> social_account.id) sama seperti versi Instagram:
+    kalau diisi, pencarian lewat username dilewati sepenuhnya.
+    """
     stats = RawInsertStats(scrape_run_id=scrape_run_id or str(uuid.uuid4()))
     fetched_at = datetime.now(timezone.utc)
 
@@ -110,16 +115,22 @@ def insert_profiles(
         logger.warning("Tidak ada item yang bisa dimasukkan ke %s", RAW_TABLE)
         return stats
 
-    stats.link_blocked_reason = social_account_link_blocked(conn)
-    if stats.link_blocked_reason:
-        logger.warning(
-            "social_account_id dikosongkan: %s. Data tetap masuk dan bisa "
-            "ditautkan lewat kolom username.",
-            stats.link_blocked_reason,
-        )
-        account_ids: dict[str, str] = {}
+    if account_ids is None:
+        stats.link_blocked_reason = social_account_link_blocked(conn)
+        if stats.link_blocked_reason:
+            logger.warning(
+                "social_account_id dikosongkan: %s. Data tetap masuk dan bisa "
+                "ditautkan lewat kolom username.",
+                stats.link_blocked_reason,
+            )
+            account_ids = {}
+        else:
+            account_ids = fetch_social_account_ids(conn, list(rows_by_username), PLATFORM_KEY)
     else:
-        account_ids = fetch_social_account_ids(conn, list(rows_by_username), PLATFORM_KEY)
+        logger.info(
+            "%s: memakai %d social_account_id dari pemanggil (tanpa cocok username)",
+            RAW_TABLE, len(account_ids),
+        )
 
     payload = []
     for username, row in rows_by_username.items():

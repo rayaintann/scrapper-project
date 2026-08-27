@@ -112,12 +112,19 @@ def insert_profiles(
     scrape_run_id: str | None = None,
     include_failed: bool = False,
     commit: bool = True,
+    account_ids: dict[str, str] | None = None,
 ) -> RawInsertStats:
     """Masukkan item Apify ke l0_raw.ig_profile_apify.
 
     Item yang dibalas Apify sebagai error (not_found, restricted) dilewati
     kecuali `include_failed` diaktifkan, karena tabel ini menyimpan profil.
     Payload aslinya tetap disimpan utuh di kolom `raw_payload`.
+
+    `account_ids` memetakan username -> social_account.id. Kalau diisi, peta itu
+    dipakai apa adanya dan pencarian lewat username DILEWATI. Scheduler Engine
+    memakainya karena sudah memegang social_account_id yang sah dari
+    `public.kol_social_account`; mencarinya ulang lewat username akan
+    memasukkan kembali ambiguitas yang justru dihindari jembatan itu.
     """
     stats = RawInsertStats(scrape_run_id=scrape_run_id or str(uuid.uuid4()))
     fetched_at = datetime.now(timezone.utc)
@@ -137,16 +144,22 @@ def insert_profiles(
         logger.warning("Tidak ada item yang bisa dimasukkan ke %s", RAW_TABLE)
         return stats
 
-    stats.link_blocked_reason = social_account_link_blocked(conn)
-    if stats.link_blocked_reason:
-        logger.warning(
-            "social_account_id dikosongkan: %s. Data tetap masuk dan bisa "
-            "ditautkan lewat kolom username.",
-            stats.link_blocked_reason,
-        )
-        account_ids: dict[str, str] = {}
+    if account_ids is None:
+        stats.link_blocked_reason = social_account_link_blocked(conn)
+        if stats.link_blocked_reason:
+            logger.warning(
+                "social_account_id dikosongkan: %s. Data tetap masuk dan bisa "
+                "ditautkan lewat kolom username.",
+                stats.link_blocked_reason,
+            )
+            account_ids = {}
+        else:
+            account_ids = fetch_social_account_ids(conn, [u for u, _ in usable])
     else:
-        account_ids = fetch_social_account_ids(conn, [u for u, _ in usable])
+        logger.info(
+            "%s: memakai %d social_account_id dari pemanggil (tanpa cocok username)",
+            RAW_TABLE, len(account_ids),
+        )
 
     payload = []
     for username, item in usable:

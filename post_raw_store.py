@@ -155,12 +155,112 @@ def _partition(
     return usable
 
 
-def _account_ids(conn, stats: PostInsertStats, usable, platform_key: str) -> dict[str, str]:
+def _account_ids(
+    conn,
+    stats: PostInsertStats,
+    usable,
+    platform_key: str,
+    diberikan: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Peta username -> social_account.id untuk baris yang akan ditulis.
+
+    Kalau `diberikan` diisi, peta itu dipakai apa adanya. Scheduler Engine selalu
+    mengisinya dengan id yang berasal dari `public.kol_social_account`, supaya
+    post tidak pernah mendarat di akun yang salah gara-gara dua KOL berbagi
+    username yang sama.
+    """
+    if diberikan is not None:
+        logger.info(
+            "%s: memakai %d social_account_id dari pemanggil (tanpa cocok username)",
+            stats.table, len(diberikan),
+        )
+        return diberikan
     stats.link_blocked_reason = _link_blocked(conn, stats.table)
     if stats.link_blocked_reason:
         logger.warning("social_account_id dikosongkan: %s", stats.link_blocked_reason)
         return {}
     return fetch_social_account_ids(conn, [u for u, _ in usable], platform_key=platform_key)
+
+
+# --- deduplication ----------------------------------------------------------
+#
+# Kedua tabel post sengaja TIDAK punya unique constraint: keduanya menyimpan
+# *snapshot*, jadi satu post yang sama boleh muncul lagi di tanggal scrape
+# berbeda dan metriknya ikut berubah. Menambahkan UNIQUE(social_account_id,
+# content_id) akan mematahkan sifat itu untuk post_pipeline.
+#
+# Scheduler Engine berjalan tiap 5 menit dan actor mengembalikan post yang sama
+# terus-menerus, jadi penyaringan dilakukan di sisi aplikasi: post yang
+# content_id-nya sudah ada untuk akun itu tidak dikirim ke INSERT sama sekali.
+# Aman untuk pipeline lain karena tidak ada perubahan skema.
+
+# Kolom id konten per tabel.
+CONTENT_ID_COLUMN = {
+    IG_TABLE: "media_id",
+    TT_TABLE: "video_id",
+}
+
+
+def existing_content_ids(
+    conn,
+    table: str,
+    content_ids: Sequence[str],
+    social_account_id: str | None = None,
+) -> set[str]:
+    """content_id yang SUDAH ada di `table`, dari daftar yang ditanyakan.
+
+    Kalau `social_account_id` diketahui, pencarian dibatasi ke akun itu — id
+    konten hanya dijamin unik per akun. Kalau tidak (penautan FK terhalang),
+    pencarian jatuh ke seluruh tabel; lebih ketat, dan konsekuensinya hanya
+    melewatkan post yang memang sudah tersimpan.
+    """
+    column = CONTENT_ID_COLUMN.get(table)
+    if column is None:
+        raise ValueError(f"tabel {table} bukan tabel post yang dikenal")
+    keys = sorted({str(c) for c in content_ids if c})
+    if not keys:
+        return set()
+
+    query = f"SELECT DISTINCT {column} FROM {table} WHERE {column} = ANY(%s)"
+    params: list = [keys]
+    if social_account_id:
+        query += " AND social_account_id = %s"
+        params.append(social_account_id)
+
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        return {row[0] for row in cur.fetchall() if row[0]}
+
+
+def split_new_and_duplicate(
+    conn,
+    table: str,
+    items: Sequence[dict],
+    social_account_id: str | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Pisahkan item jadi (belum pernah masuk, sudah pernah masuk).
+
+    Item error dan item tanpa id konten dibiarkan lewat sebagai "baru": yang
+    berhak menyaringnya adalah `_partition` di dalam insert_*, dan menahannya
+    di sini akan menyembunyikan kegagalan dari log.
+    """
+    ids = [cid for cid in (_content_id(i) for i in items if isinstance(i, dict)) if cid]
+    sudah_ada = existing_content_ids(conn, table, ids, social_account_id)
+    if not sudah_ada:
+        return list(items), []
+
+    baru: list[dict] = []
+    duplikat: list[dict] = []
+    for item in items:
+        cid = _content_id(item) if isinstance(item, dict) else None
+        if cid and cid in sudah_ada:
+            duplikat.append(item)
+        else:
+            baru.append(item)
+    logger.info(
+        "%s: %d item baru, %d duplikat dilewati", table, len(baru), len(duplikat)
+    )
+    return baru, duplikat
 
 
 # --- Instagram --------------------------------------------------------------
@@ -174,6 +274,7 @@ def insert_ig_posts(
     scraped_at: datetime,
     scrape_run_id: str | None = None,
     commit: bool = True,
+    account_ids: dict[str, str] | None = None,
 ) -> PostInsertStats:
     """Masukkan post Instagram ke `l0_raw.ig_media_snapshots_apify`."""
     stats = PostInsertStats(
@@ -186,7 +287,7 @@ def insert_ig_posts(
         logger.warning("Tidak ada post Instagram yang bisa dimasukkan ke %s", IG_TABLE)
         return stats
 
-    account_ids = _account_ids(conn, stats, usable, "instagram")
+    account_ids = _account_ids(conn, stats, usable, "instagram", account_ids)
 
     payload = []
     for username, item in usable:
@@ -265,6 +366,7 @@ def insert_tt_videos(
     scraped_at: datetime,
     scrape_run_id: str | None = None,
     commit: bool = True,
+    account_ids: dict[str, str] | None = None,
 ) -> PostInsertStats:
     """Masukkan video TikTok ke `l0_raw.tt_video_apify`."""
     stats = PostInsertStats(
@@ -277,7 +379,7 @@ def insert_tt_videos(
         logger.warning("Tidak ada video TikTok yang bisa dimasukkan ke %s", TT_TABLE)
         return stats
 
-    account_ids = _account_ids(conn, stats, usable, "tiktok")
+    account_ids = _account_ids(conn, stats, usable, "tiktok", account_ids)
 
     payload = []
     for username, item in usable:

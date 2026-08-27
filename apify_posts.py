@@ -20,7 +20,7 @@ from typing import Sequence
 
 from apify_runner import ProfileScraper
 from config import ApifyConfig, TikTokConfig
-from transform import normalize_username
+from transform import extract_username, normalize_username
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,85 @@ class InstagramPostScraper(ProfileScraper):
             if found:
                 return found
         return None
+
+
+class InstagramDetailsScraper(ProfileScraper):
+    """`apify/instagram-scraper` mode **details**: profil + post dalam satu run.
+
+    Kenapa mode ini, bukan dua run terpisah: Scheduler Engine wajib memakai
+    `apify/instagram-scraper` untuk profil DAN post. Mode `details`
+    mengembalikan satu objek profil per URL yang sudah membawa `latestPosts`,
+    jadi satu run memenuhi keduanya dan profilnya hanya ditagih sekali.
+
+    Bentuk field profilnya (`fullName`, `biography`, `externalUrl`,
+    `followersCount`, `followsCount`, `postsCount`) identik dengan keluaran
+    `apify/instagram-profile-scraper`, sehingga `raw_store.insert_profiles`
+    bisa dipakai apa adanya tanpa pemetaan baru.
+
+    `latestPosts` TIDAK membawa `ownerUsername` — pemiliknya hanya diketahui
+    dari URL profil yang diminta. `posts_of()` yang menempelkannya, supaya
+    `post_raw_store.insert_ig_posts` bisa mengenali pemilik tiap post lewat
+    `InstagramPostScraper.item_username` yang sudah ada.
+    """
+
+    # Sama seperti scraper profil Instagram: actor mengembalikan item error
+    # eksplisit untuk akun yang tidak ada, jadi dataset kosong memang berarti
+    # tidak ada hasil dan bukan pemblokiran.
+    empty_is_failure = False
+    retry_missing = False
+    seconds_per_username = 30
+
+    def __init__(self, cfg: ApifyConfig, results_limit: int = 10, **kwargs):
+        actor_id = kwargs.pop("actor_id", None) or DEFAULT_IG_POST_ACTOR
+        super().__init__(cfg, actor_id=actor_id, **kwargs)
+        self._results_limit = results_limit
+
+    def build_input(self, usernames: Sequence[str]) -> dict:
+        return {
+            "directUrls": [f"https://www.instagram.com/{u}/" for u in usernames],
+            "resultsType": "details",
+            # Membatasi jumlah `latestPosts` yang dibawa tiap profil.
+            "resultsLimit": self._results_limit,
+            "searchType": "user",
+            "addParentData": False,
+        }
+
+    def item_username(self, item: dict) -> str | None:
+        if not isinstance(item, dict):
+            return None
+        # Objek profil membawa `username` langsung.
+        found = extract_username(item)
+        if found:
+            return found
+        # Item error hanya membawa URL yang diminta.
+        for key in ("inputUrl", "url", "input"):
+            found = _from_url(item.get(key), _IG_URL)
+            if found:
+                return found
+        return None
+
+    def posts_of(self, item: dict) -> list[dict]:
+        """Post terbaru dari satu item profil, sudah ditempeli `ownerUsername`.
+
+        Item error tidak punya `latestPosts` dan menghasilkan daftar kosong —
+        klasifikasinya diserahkan ke `post_errors`, bukan ditebak di sini.
+        """
+        if not isinstance(item, dict):
+            return []
+        posts = item.get("latestPosts")
+        if not isinstance(posts, list):
+            return []
+        owner = self.item_username(item)
+        hasil = []
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            if owner and not post.get("ownerUsername"):
+                # Salin, jangan ubah item aslinya: `raw_payload` profil harus
+                # tetap persis seperti yang dikembalikan actor.
+                post = {**post, "ownerUsername": owner}
+            hasil.append(post)
+        return hasil
 
 
 class TikTokVideoScraper(ProfileScraper):
