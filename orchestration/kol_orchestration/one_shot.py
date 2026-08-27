@@ -7,16 +7,28 @@ cron 5 menit sudah dibatalkan, dan file `schedules.py` yang dulu memuatnya sudah
 dihapus. Yang tersisa hanya job yang harus dijalankan MANUAL — dari UI Dagster
 atau CLI. Tidak ada jalur yang bisa memanggil actor sendiri.
 
-DUA JOB, SENGAJA TERPISAH
-=========================
-    one_shot_scrape_job      berbiaya  — memanggil Apify, jalankan SEKALI
-    transform_chain_job      gratis    — hanya SQL, boleh diulang berapa kali pun
+DUA JOB, SATU RANTAI
+====================
+    one_shot_scrape_job      berbiaya  — Apify -> L0 RAW -> ... -> L2 Gold
+    transform_chain_job      gratis    — hanya L0 -> L2, boleh diulang
 
-Pemisahan ini bukan kosmetik. Rantai transformasi idempoten dan aman diulang;
-scraping tidak. Menggabungkan keduanya dalam satu job berarti setiap kali ingin
-menjalankan ulang transformasi, Anda ikut membayar actor lagi.
+`one_shot_scrape_job` berisi DUA op berurutan:
 
-`run_e2e_once.py` di root menjalankan keduanya berurutan dalam satu perintah.
+    scrape_once_op  ->  transform_to_gold_op
+
+Urutan dijamin oleh aliran data antar-op: `transform_to_gold_op` menerima
+keluaran `scrape_once_op` sebagai argumen, jadi Dagster tidak akan menjalankannya
+sebelum scraping selesai. Kalau scraping gagal, `scrape_once_op` melempar
+`Failure` dan op transformasi TIDAK dijalankan sama sekali — data L0 yang tidak
+berubah tidak perlu diolah ulang.
+
+`transform_chain_job` tetap ada dan berdiri sendiri. Rantai transformasi
+idempoten dan gratis, jadi harus bisa dijalankan ulang tanpa memanggil actor
+lagi — misalnya setelah memperbaiki procedure, atau untuk menyusul data L0 yang
+masuk lewat jalur lain.
+
+`run_e2e_once.py` di root memakai fungsi yang sama (`jalankan_transform_chain`),
+sehingga jalur CLI dan jalur Dagster tidak bisa berbeda perilaku.
 
 RANTAI TRANSFORMASI
 ===================
@@ -42,7 +54,9 @@ from dagster import (
     AssetKey,
     AssetSelection,
     Failure,
+    In,
     MetadataValue,
+    Nothing,
     Output,
     define_asset_job,
     job,
@@ -85,6 +99,81 @@ TRANSFORM_ASSETS = (
     "kol_metric_daily",
     "kol_metric_monthly",
 )
+
+
+# --- rantai transformasi (dipakai op Dagster DAN CLI) -----------------------
+
+
+def _semua_asset():
+    """Seluruh objek asset yang terdaftar, diambil dari modulnya langsung.
+
+    Tidak lewat `repository.py` supaya tidak terjadi impor melingkar —
+    `repository` yang mengimpor modul ini, bukan sebaliknya.
+    """
+    from kol_orchestration.assets.audience import audience_assets
+    from kol_orchestration.assets.feature_engagement import feature_engagement_assets
+    from kol_orchestration.assets.feature_post import feature_post_assets
+    from kol_orchestration.assets.followers import follower_assets
+    from kol_orchestration.assets.gold import gold_assets
+    from kol_orchestration.assets.gold_profile import gold_profile_assets
+    from kol_orchestration.assets.harmonization import harmonization_assets
+    from kol_orchestration.assets.silver import silver_assets
+
+    return [
+        *harmonization_assets, *silver_assets,
+        *feature_engagement_assets, *feature_post_assets,
+        *gold_assets, *gold_profile_assets,
+        *follower_assets, *audience_assets,
+    ]
+
+
+def jalankan_transform_chain(logger=None):
+    """Materialize 13 asset L0 Harmonization -> L2 Gold. Tidak memanggil actor.
+
+    Memakai definisi asset yang sama persis dengan yang dipakai UI Dagster, jadi
+    tidak ada perhitungan metric yang ditulis ulang di sini. Urutan antar layer
+    dijaga Dagster lewat `deps` antar asset.
+
+    Seluruh asset memakai `ON CONFLICT ... DO UPDATE` dengan kunci unik yang
+    jelas, sehingga menjalankan ini berkali-kali tidak menghasilkan duplikat.
+
+    Mengembalikan `(sukses, daftar_ringkasan_per_asset)`.
+    """
+    from dagster import materialize
+
+    # Diimpor saat dipanggil: `repository` mengimpor modul ini, jadi impor di
+    # puncak modul akan melingkar.
+    from kol_orchestration.repository import _build_connection_string
+    from kol_orchestration.resources import PostgresResource
+
+    hasil = materialize(
+        assets=_semua_asset(),
+        selection=[AssetKey(n) for n in TRANSFORM_ASSETS],
+        resources={"postgres": PostgresResource(
+            connection_string=_build_connection_string()
+        )},
+        raise_on_error=False,
+    )
+
+    ringkasan = []
+    for ev in hasil.get_asset_materialization_events():
+        mat = ev.event_specific_data.materialization
+        nama = mat.asset_key.to_user_string()
+        detail = ", ".join(
+            f"{k}={v.value}" for k, v in list(mat.metadata.items())[:3]
+            if hasattr(v, "value") and not isinstance(v.value, (dict, list))
+        )
+        baris = f"{nama}: {detail}"
+        ringkasan.append(baris)
+        if logger:
+            logger.info("  OK %s", baris[:120])
+
+    if not hasil.success:
+        gagal = [e.step_key for e in hasil.all_events
+                 if e.event_type_value == "STEP_FAILURE"]
+        if logger:
+            logger.error("Rantai transformasi GAGAL: %s", ", ".join(gagal) or "(lihat log)")
+    return hasil.success, ringkasan
 
 
 # --- job berbiaya: scraping -------------------------------------------------
@@ -155,15 +244,62 @@ def scrape_once_op(context) -> Output[dict]:
     return Output(ringkas, metadata=metadata)
 
 
+@op(
+    name="transform_to_gold",
+    description=(
+        "L0 RAW -> L0 Harmonization -> L1 Silver -> Feature -> L2 Gold "
+        "memakai 13 asset existing. Tidak memanggil actor, idempoten."
+    ),
+    ins={"hasil_scrape": In(dagster_type=Nothing)},
+)
+def transform_to_gold_op(context) -> Output[dict]:
+    """Jalankan rantai transformasi setelah scraping selesai.
+
+    `hasil_scrape` bertipe `Nothing`: nilainya tidak dipakai, keberadaannya
+    hanya untuk memberi tahu Dagster bahwa op ini bergantung pada
+    `scrape_once_op` dan tidak boleh berjalan lebih dulu.
+
+    Op ini TIDAK akan dijalankan kalau scraping gagal, karena `scrape_once_op`
+    melempar `Failure` dan Dagster menghentikan langkah di hilirnya.
+    """
+    context.log.info("Scraping selesai. Menjalankan rantai transformasi L0 -> L2.")
+    sukses, ringkasan = jalankan_transform_chain(logger=context.log)
+
+    metadata = {
+        "asset_dimaterialisasi": MetadataValue.int(len(ringkasan)),
+        "asset_diminta": MetadataValue.int(len(TRANSFORM_ASSETS)),
+        "ringkasan": MetadataValue.md(
+            "\n".join(f"- `{b}`" for b in ringkasan) or "_(tidak ada)_"
+        ),
+    }
+    if not sukses:
+        raise Failure(
+            description=(
+                "Rantai transformasi gagal. Data L0 RAW hasil scraping sudah "
+                "tersimpan dan tidak hilang — jalankan transform_chain_job "
+                "untuk mengulang tanpa memanggil actor lagi."
+            ),
+            metadata=metadata,
+        )
+
+    return Output(
+        {"asset_dimaterialisasi": len(ringkasan), "sukses": True},
+        metadata=metadata,
+    )
+
+
 @job(
     name=SCRAPE_JOB_NAME,
     description=(
-        "ONE-SHOT scraping (BERBIAYA — memanggil Apify). Jalankan manual, sekali. "
-        "Setelah selesai, jalankan transform_chain_job."
+        "ONE-SHOT (BERBIAYA — memanggil Apify): scraping 1 profil + maks 10 post, "
+        "lalu OTOMATIS meneruskan L0 RAW -> Harmonization -> L1 -> Feature -> "
+        "L2 Gold. Jalankan manual, sekali. Tanpa retry actor."
     ),
 )
 def one_shot_scrape_job() -> None:
-    scrape_once_op()
+    # Keluaran op pertama jadi masukan op kedua: itulah yang membuat Dagster
+    # menjalankannya berurutan, bukan paralel.
+    transform_to_gold_op(scrape_once_op())
 
 
 # --- job gratis: rantai transformasi ----------------------------------------
@@ -173,7 +309,10 @@ transform_chain_job = define_asset_job(
     selection=AssetSelection.assets(*[AssetKey(n) for n in TRANSFORM_ASSETS]),
     description=(
         "L0 Harmonization -> L1 Silver -> Feature -> L2 Gold memakai asset "
-        "existing. Hanya SQL, tidak memanggil actor, aman diulang."
+        "existing. Hanya SQL, tidak memanggil actor, aman diulang. Job ini "
+        "berdiri sendiri: one_shot_scrape_job sudah menjalankan rantai yang "
+        "sama secara otomatis, tapi job ini tetap ada untuk mengulang "
+        "transformasi tanpa biaya."
     ),
 )
 

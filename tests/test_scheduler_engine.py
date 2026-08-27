@@ -642,3 +642,143 @@ class DurasiMencakupRunActor(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- orkestrasi: scraping otomatis meneruskan ke L2 -------------------------
+
+
+class OneShotJobMeneruskanKeGold(unittest.TestCase):
+    """one_shot_scrape_job: scraping -> L0 -> Harmonization -> L1 -> Feature -> L2."""
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        jalur = str(PROJECT_ROOT / "orchestration")
+        if jalur not in sys.path:
+            sys.path.insert(0, jalur)
+        from kol_orchestration import one_shot
+        cls.one_shot = one_shot
+
+    def test_job_punya_dua_op(self):
+        # Urutan `graph.nodes` tidak dijamin topologis, jadi yang dibandingkan
+        # himpunannya; urutannya diuji lewat peta dependency di bawah.
+        graph = self.one_shot.one_shot_scrape_job.graph
+        self.assertEqual(set(graph.node_dict), {"scrape_once", "transform_to_gold"})
+
+    def test_transform_bergantung_pada_scrape(self):
+        """Inilah yang membuat Dagster menjalankannya berurutan, bukan paralel."""
+        graph = self.one_shot.one_shot_scrape_job.graph
+        peta = {inv.name: dep for inv, dep in graph.dependencies.items()}
+
+        self.assertEqual(peta["scrape_once"], {}, "scraping tidak boleh punya hulu")
+
+        hulu = peta["transform_to_gold"]
+        self.assertEqual(set(hulu), {"hasil_scrape"})
+        self.assertEqual(hulu["hasil_scrape"].node, "scrape_once")
+
+    def test_transform_dijalankan_setelah_scrape_sukses(self):
+        urutan = []
+
+        def scrape_palsu(**kw):
+            urutan.append("scrape")
+            return [
+                se.JobResult(run_id="r", category="profile", platform="instagram",
+                             actor="apify/instagram-scraper", started_at=se._now(),
+                             finished_at=se._now(), status="success",
+                             username="kol_x", profiles_processed=1),
+                se.JobResult(run_id="r", category="post", platform="instagram",
+                             actor="apify/instagram-scraper", started_at=se._now(),
+                             finished_at=se._now(), status="success",
+                             username="kol_x", posts_fetched=10, posts_saved=10),
+            ]
+
+        def transform_palsu(logger=None):
+            urutan.append("transform")
+            return True, [f"{n}: ok" for n in self.one_shot.TRANSFORM_ASSETS]
+
+        with mock.patch.object(self.one_shot, "run_once", side_effect=scrape_palsu), \
+             mock.patch.object(self.one_shot, "jalankan_transform_chain",
+                               side_effect=transform_palsu):
+            hasil = self.one_shot.one_shot_scrape_job.execute_in_process()
+
+        self.assertTrue(hasil.success)
+        self.assertEqual(urutan, ["scrape", "transform"])
+        keluaran = hasil.output_for_node("transform_to_gold")
+        self.assertEqual(keluaran["asset_dimaterialisasi"], 13)
+
+    def test_transform_TIDAK_jalan_kalau_scrape_gagal(self):
+        urutan = []
+
+        def scrape_gagal(**kw):
+            urutan.append("scrape")
+            return [se.JobResult(run_id="r", category="profile", platform="instagram",
+                                 actor="apify/instagram-scraper", started_at=se._now(),
+                                 finished_at=se._now(), status="failed",
+                                 error_message="actor diblokir")]
+
+        def transform_palsu(logger=None):
+            urutan.append("transform")
+            return True, []
+
+        with mock.patch.object(self.one_shot, "run_once", side_effect=scrape_gagal), \
+             mock.patch.object(self.one_shot, "jalankan_transform_chain",
+                               side_effect=transform_palsu):
+            hasil = self.one_shot.one_shot_scrape_job.execute_in_process(
+                raise_on_error=False
+            )
+
+        self.assertFalse(hasil.success)
+        self.assertEqual(urutan, ["scrape"], "transform tidak boleh jalan")
+
+    def test_transform_gagal_membuat_job_gagal(self):
+        def scrape_ok(**kw):
+            return [se.JobResult(run_id="r", category="profile", platform="instagram",
+                                 actor="apify/instagram-scraper", started_at=se._now(),
+                                 finished_at=se._now(), status="success",
+                                 username="kol_x", profiles_processed=1)]
+
+        with mock.patch.object(self.one_shot, "run_once", side_effect=scrape_ok), \
+             mock.patch.object(self.one_shot, "jalankan_transform_chain",
+                               return_value=(False, [])):
+            hasil = self.one_shot.one_shot_scrape_job.execute_in_process(
+                raise_on_error=False
+            )
+        self.assertFalse(hasil.success)
+
+    def test_transform_chain_job_tetap_berdiri_sendiri(self):
+        job = self.one_shot.transform_chain_job
+        self.assertEqual(job.name, "transform_chain_job")
+        self.assertIn(job, self.one_shot.one_shot_jobs)
+        self.assertIn(self.one_shot.one_shot_scrape_job, self.one_shot.one_shot_jobs)
+
+    def test_rantai_menutup_semua_layer(self):
+        for wajib in ("instagram_profile", "instagram_post", "tiktok_profile",
+                      "tiktok_post", "unified_profile", "unified_post",
+                      "ig_post_analysis", "ig_engagement_analysis",
+                      "tt_post_analysis", "tt_engagement_analysis",
+                      "kol_profile_card", "kol_metric_daily", "kol_metric_monthly"):
+            self.assertIn(wajib, self.one_shot.TRANSFORM_ASSETS)
+
+    def test_tidak_ada_schedule_atau_cron(self):
+        # Yang dilarang MEMBUAT schedule, bukan menyebutnya di dokumentasi.
+        # Jadi yang dicari pemanggilan dan impor, bukan teks bebas.
+        self.assertEqual(self.one_shot.one_shot_schedules, [])
+        s = _sumber(ORCH / "one_shot.py")
+        self.assertNotIn("ScheduleDefinition(", s)
+        self.assertNotIn("cron_schedule=", s)
+        self.assertNotIn("*/5", s)
+        baris_impor = [b for b in s.splitlines() if "ScheduleDefinition" in b
+                       and ("import" in b or b.strip().startswith("Schedule"))]
+        self.assertEqual(baris_impor, [], "ScheduleDefinition tidak boleh diimpor")
+
+    def test_repository_tidak_mendaftarkan_schedule(self):
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "orchestration"))
+        from kol_orchestration.repository import defs
+        with self.assertRaises(Exception):
+            defs.get_schedule_def("scheduled_scrape_every_5_min")
+
+    def test_cli_dan_dagster_memakai_fungsi_transform_yang_sama(self):
+        s = _sumber(PROJECT_ROOT / "run_e2e_once.py")
+        self.assertIn("from kol_orchestration.one_shot import", s)
+        self.assertIn("jalankan_transform_chain", s)

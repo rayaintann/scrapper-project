@@ -58,62 +58,26 @@ logger = logging.getLogger("run_e2e_once")
 def run_transform_chain() -> bool:
     """Jalankan rantai L0 Harmonization -> L2 Gold memakai asset existing.
 
+    Mendelegasikan ke `kol_orchestration.one_shot.jalankan_transform_chain`,
+    fungsi yang sama yang dipakai `transform_to_gold_op` di dalam
+    `one_shot_scrape_job`. Satu sumber kebenaran: jalur CLI dan jalur Dagster
+    tidak bisa berbeda perilaku.
+
     Diimpor di dalam fungsi, bukan di puncak modul: paket Dagster berat dan
     `--plan-only` tidak membutuhkannya sama sekali.
     """
-    from dagster import AssetKey, materialize
-    from kol_orchestration.one_shot import TRANSFORM_ASSETS
-    from kol_orchestration.repository import _build_connection_string
-    from kol_orchestration.resources import PostgresResource
-
-    # Kumpulkan objek asset yang sesungguhnya dari repository, supaya definisi
-    # yang dijalankan persis sama dengan yang dipakai UI Dagster.
-    from kol_orchestration.assets.audience import audience_assets
-    from kol_orchestration.assets.feature_engagement import feature_engagement_assets
-    from kol_orchestration.assets.feature_post import feature_post_assets
-    from kol_orchestration.assets.followers import follower_assets
-    from kol_orchestration.assets.gold import gold_assets
-    from kol_orchestration.assets.gold_profile import gold_profile_assets
-    from kol_orchestration.assets.harmonization import harmonization_assets
-    from kol_orchestration.assets.silver import silver_assets
-
-    semua = [
-        *harmonization_assets, *silver_assets,
-        *feature_engagement_assets, *feature_post_assets,
-        *gold_assets, *gold_profile_assets,
-        *follower_assets, *audience_assets,
-    ]
-    pilihan = [AssetKey(n) for n in TRANSFORM_ASSETS]
+    from kol_orchestration.one_shot import TRANSFORM_ASSETS, jalankan_transform_chain
 
     print("\n" + "=" * 72)
-    print(f"RANTAI TRANSFORMASI — {len(pilihan)} asset (gratis, idempoten)")
+    print(f"RANTAI TRANSFORMASI — {len(TRANSFORM_ASSETS)} asset (gratis, idempoten)")
     print("=" * 72)
 
-    hasil = materialize(
-        assets=semua,
-        selection=pilihan,
-        resources={"postgres": PostgresResource(
-            connection_string=_build_connection_string()
-        )},
-        raise_on_error=False,
-    )
-
-    for ev in hasil.get_asset_materialization_events():
-        key = ev.event_specific_data.materialization.asset_key.to_user_string()
-        meta = ev.event_specific_data.materialization.metadata
-        ringkas = ", ".join(
-            f"{k}={v.value}" for k, v in list(meta.items())[:3]
-            if hasattr(v, "value") and not isinstance(v.value, (dict, list))
-        )
-        print(f"   OK   {key:26s} {ringkas[:90]}")
-
-    if not hasil.success:
-        gagal = [
-            e.step_key for e in hasil.all_events
-            if e.event_type_value == "STEP_FAILURE"
-        ]
-        print(f"\n   GAGAL: {', '.join(gagal) if gagal else '(lihat log di atas)'}")
-    return hasil.success
+    sukses, ringkasan = jalankan_transform_chain()
+    for baris in ringkasan:
+        print(f"   OK   {baris[:100]}")
+    if not sukses:
+        print("\n   GAGAL — lihat log di atas.")
+    return sukses
 
 
 def parse_args(argv=None) -> argparse.Namespace:
