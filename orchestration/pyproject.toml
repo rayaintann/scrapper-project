@@ -1,0 +1,28 @@
+[project]
+name = "kol-orchestration"
+version = "0.1.0"
+description = "Orkestrasi Dagster untuk pipeline KOL: l0_raw -> l0_harmonization -> l1_silver -> feature -> l2_gold (database `kol`)."
+requires-python = ">=3.10"
+
+dependencies = [
+    "dagster",
+    "dagster-webserver",
+    "psycopg2-binary",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+include = ["kol_orchestration*"]
+
+# Dipakai `dagster dev` untuk menemukan objek Definitions.
+[tool.dagster]
+module_name = "kol_orchestration.repository"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

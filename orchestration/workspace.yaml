@@ -1,0 +1,4 @@
+# Memberi tahu Dagster di mana objek `Definitions` berada.
+# Modul ini di-import, BUKAN dijalankan sebagai script.
+load_from:
+  - python_module: kol_orchestration.repository

@@ -1,0 +1,10 @@
+.env
+venv/
+output/
+__pycache__/
+*.pyc
+
+# Dagster (orchestration/)
+.dagster_home/
+.tmp_dagster_home*/
+*.egg-info/

@@ -1,0 +1,123 @@
+"""Titik masuk Dagster untuk pipeline KOL.
+
+Di sinilah seluruh asset, job, schedule, sensor, dan resource didaftarkan.
+`workspace.yaml` menunjuk ke modul ini.
+
+FASE 5 (awal) — L2 Gold pertama, di atas jalur Fase 1b yang sudah lengkap.
+
+Terdaftar sekarang (11 asset):
+    l0_harmonization
+        instagram_profile        @asset      CALL sp_sync_instagram_profile()
+        tiktok_profile           @asset      CALL sp_sync_tiktok_profile()
+        instagram_post           @asset      CALL sp_sync_instagram_post()
+        tiktok_post              @asset      CALL sp_sync_tiktok_post()
+    l1_silver
+        unified_profile          @asset      SELECT sp_build_unified_profile()
+        unified_post             @asset      SELECT sp_build_unified_post()
+                                             (setelah unified_profile)
+    feature
+        ig_engagement_analysis   @asset      grain: social_account_id
+        tt_engagement_analysis   @asset      grain: social_account_id
+        ig_post_analysis         @asset      grain: social_account_id + media_id
+        tt_post_analysis         @asset      grain: social_account_id + video_id
+    l2_gold
+        kol_metric_daily         @asset      grain: akun + platform + tanggal tayang
+
+Dua AssetSpec L1 dari Fase 1a diganti @asset bernama sama, jadi jumlah asset
+bertambah 4 (bukan 6): unified_profile dan unified_post sudah terdaftar sejak
+Fase 1a sebagai asset eksternal.
+
+`sp_sync_all()` SENGAJA tidak dipakai — ia membungkus semua anaknya dengan
+EXCEPTION handler sehingga selalu sukses walau anaknya gagal. Keempat pekerja
+harmonization dipanggil langsung supaya kegagalan per tabel terlihat.
+
+Rencana berikutnya (lihat rancangan arsitektur):
+    Fase 2   cpe
+    Fase 3   comments / follower / Insights
+    Fase 4   metrik yang menunggu definisi algoritma
+    Fase 5   L2 Gold lanjutan (kol_metric_monthly, post_metric, audience)
+
+KREDENSIAL — tidak pernah ditulis di kode.
+Dibaca dari environment (file `.env` di root project, sudah di-.gitignore):
+
+    KOL_DB_URL   postgresql://user:password@host:port/kol
+                 kalau diisi, ini yang dipakai.
+
+    Kalau KOL_DB_URL kosong, connection string dirakit dari variabel yang
+    sudah dipakai pipeline scraping supaya kredensialnya tidak terduplikasi:
+        PG_USER, PG_PASSWORD, PG_HOST, PG_PORT, PG_DB
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from urllib.parse import quote_plus
+
+from dotenv import load_dotenv
+from dagster import Definitions
+
+from kol_orchestration.resources import PostgresResource
+from kol_orchestration.assets.harmonization import harmonization_assets
+from kol_orchestration.assets.silver import silver_assets
+from kol_orchestration.assets.feature_engagement import feature_engagement_assets
+from kol_orchestration.assets.feature_post import feature_post_assets
+from kol_orchestration.assets.gold import gold_assets
+from kol_orchestration.assets.gold_profile import gold_profile_assets
+from kol_orchestration.assets.followers import follower_assets
+from kol_orchestration.assets.audience import audience_assets
+
+# .env ada di root project (satu tingkat di atas folder orchestration/).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_PROJECT_ROOT / ".env")
+
+
+def _build_connection_string() -> str:
+    """Rakit connection string ke database `kol` dari environment.
+
+    Diutamakan KOL_DB_URL bila diisi. Kalau tidak, dirakit dari PG_* yang
+    sudah dipakai pipeline scraping — supaya kredensial hanya ada di satu
+    tempat, tidak diduplikasi antara scraper dan orchestrator.
+
+    Password di-URL-encode: password yang mengandung '@', ':', atau '/' akan
+    merusak URL kalau ditempel mentah, dan gejalanya menyesatkan
+    ("host tidak ditemukan", bukan "password salah").
+    """
+    url = os.getenv("KOL_DB_URL")
+    if url:
+        return url
+
+    wajib = ("PG_USER", "PG_PASSWORD", "PG_HOST", "PG_DB")
+    kurang = [k for k in wajib if not os.getenv(k)]
+    if kurang:
+        raise RuntimeError(
+            "Koneksi database belum lengkap. Isi KOL_DB_URL, atau lengkapi "
+            f"variabel berikut di {_PROJECT_ROOT / '.env'}: {', '.join(kurang)}. "
+            "Contoh formatnya ada di orchestration/.env.example."
+        )
+
+    user = quote_plus(os.environ["PG_USER"])
+    password = quote_plus(os.environ["PG_PASSWORD"])
+    host = os.environ["PG_HOST"]
+    port = os.getenv("PG_PORT", "5432")
+    database = os.environ["PG_DB"]
+    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+
+
+defs = Definitions(
+    assets=[
+        *harmonization_assets,       # l0_harmonization: 4 sp_sync_* (Fase 1b)
+        *silver_assets,              # l1_silver: 2 sp_build_unified_* (Fase 1b)
+        *feature_engagement_assets,  # feature: engagement per akun (Fase 1a)
+        *feature_post_assets,        # feature: analisis per post (Fase 1c)
+        *gold_assets,                # l2_gold: rekap harian per KOL (SCRUM-513)
+        *gold_profile_assets,        # l2_gold: kartu profil per KOL (SCRUM-514)
+        *follower_assets,            # l0_harm + l1: rantai daftar follower
+        *audience_assets,            # feature + l2_gold: audiens hasil inferensi
+    ],
+    resources={
+        "postgres": PostgresResource(
+            connection_string=_build_connection_string(),
+        ),
+    },
+)

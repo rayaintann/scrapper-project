@@ -1,0 +1,18 @@
+# Konfigurasi instance Dagster (dibaca dari folder DAGSTER_HOME).
+#
+# PENTING: set DAGSTER_HOME ke folder TETAP sebelum menjalankan `dagster dev`.
+# Tanpa itu Dagster memakai folder sementara acak (`.tmp_dagster_home_*`) dan
+# seluruh riwayat run hilang begitu proses berhenti.
+#
+#   PowerShell:  $env:DAGSTER_HOME = "D:\intern\scrapper-project\orchestration\.dagster_home"
+
+code_servers:
+  # Import modul pertama kali bisa lambat. Batas longgar supaya tidak
+  # timeout palsu di mesin yang lambat.
+  local_startup_timeout: 300
+
+compute_logs:
+  # Log stdout/stderr per step tidak disimpan ke disk. Log tetap terlihat di
+  # terminal dan di UI; ini hanya mematikan penyimpanan file terpisah.
+  module: dagster._core.storage.noop_compute_log_manager
+  class: NoOpComputeLogManager
