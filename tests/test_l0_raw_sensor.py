@@ -12,7 +12,7 @@ Tidak satu pun tes di sini menyentuh Apify atau Postgres sungguhan:
                        meledak selama sensor dievaluasi.
     * rantai transform `transform_chain_job` dijalankan SUNGGUHAN lewat Dagster,
                        tapi satu helper database per modul asset di-stub. Jadi
-                       orkestrasinya (13 asset, urutan L0 -> L2) benar-benar
+                       orkestrasinya (15 asset, urutan L0 -> L2) benar-benar
                        diuji, sementara SQL-nya tidak pernah menembak database
                        dan tidak diubah sebaris pun.
 
@@ -308,6 +308,7 @@ class RantaiSampaiL2(unittest.TestCase):
             "ig_post_analysis", "tt_post_analysis",
             # L2 Gold
             "kol_profile_card", "kol_metric_daily", "kol_metric_monthly",
+            "post_metric", "content_format_daily",
         }
         self.assertTrue(wajib.issubset(set(one_shot.TRANSFORM_ASSETS)))
 
@@ -342,12 +343,20 @@ class RantaiSampaiL2(unittest.TestCase):
                              deps("kol_metric_daily"))
         self.assertIn("unified_profile", deps("kol_profile_card"))
         self.assertIn("kol_metric_daily", deps("kol_metric_monthly"))
+        # Grain konten butuh layer feature (rank, top_hashtags); grain format
+        # cukup L1 karena dimensinya media_type, bukan hasil analisis.
+        self.assertLessEqual(
+            {"unified_post", "unified_profile", "ig_post_analysis",
+             "tt_post_analysis"},
+            deps("post_metric"))
+        self.assertLessEqual({"unified_post", "unified_profile"},
+                             deps("content_format_daily"))
 
     def test_job_yang_dipicu_benar_benar_jalan_sampai_l2(self):
         """Eksekusi `transform_chain_job` sungguhan, dengan SQL-nya di-stub.
 
         Yang diuji ORKESTRASInya: apakah job yang dipicu sensor benar-benar
-        menjalankan ke-13 asset dan berhenti di L2 Gold. Isi SQL tiap asset
+        menjalankan ke-15 asset dan berhenti di L2 Gold. Isi SQL tiap asset
         tidak disentuh dan tidak diubah -- hanya satu helper per modul yang
         diganti, supaya tes ini tetap offline dan tidak menulis ke database.
         """
@@ -357,7 +366,7 @@ class RantaiSampaiL2(unittest.TestCase):
 
         from dagster import Output
         from kol_orchestration.assets import (
-            feature_engagement, feature_post, gold, gold_profile,
+            feature_engagement, feature_post, gold, gold_post, gold_profile,
             harmonization, silver,
         )
         from kol_orchestration.repository import defs
@@ -372,6 +381,8 @@ class RantaiSampaiL2(unittest.TestCase):
             (harmonization, "_jalankan"), (silver, "_jalankan"),
             (feature_engagement, "_jalankan"), (feature_post, "_jalankan"),
             (gold, "_jalankan"), (gold, "_jalankan_bulanan"),
+            (gold_post, "_jalankan_post_metric"),
+            (gold_post, "_jalankan_content_format"),
             (gold_profile, "_jalankan"),
         )
 

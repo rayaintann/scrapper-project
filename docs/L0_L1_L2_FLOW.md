@@ -47,7 +47,7 @@ Terurai:
    (Dagster, event-based)     (count(*), max(fetched_at)) atas 8 tabel sumber
                                 │
                                 ▼
-                     transform_chain_job  (13 asset)
+                     transform_chain_job  (15 asset)
                                 │
         l0_harmonization ──► l1_silver ──► feature ──► l2_gold
                                 │
@@ -116,10 +116,10 @@ ini; keduanya kebetulan bernama schema sama.
 
 Database `kol`, schema `l2_gold`.
 
-> **Status 28 Agustus 2026: 6 dari 8 tabel L2 sudah tersambung ke UI.**
+> **Status 1 September 2026: 8 dari 8 tabel L2 sudah tersambung ke UI.**
 > Sebelumnya nol — semua query `kolDb()` berhenti di `l1_silver` dan `public`.
-> Sambungannya lewat service baru `src/lib/discover/kolGold.ts` di repo UI, yang
-> masuk `KolCreatorPayload.gold` dan dibaca tiga section di halaman
+> Sambungannya lewat service `src/lib/discover/kolGold.ts` di repo UI, yang
+> masuk `KolCreatorPayload.gold` dan dibaca **empat** section di halaman
 > `/…/discover/kol-directory/[kolId]`.
 >
 > ⚠️ **Perubahan itu masih UNCOMMITTED** di clone lokal
@@ -127,9 +127,27 @@ Database `kol`, schema `l2_gold`.
 > belum di-push, jadi belum ada di branch remote. Bagian di bawah menjelaskan
 > keadaan clone itu, bukan keadaan branch di GitHub.
 >
-> Dua tabel sisanya (`content_format_daily`, `post_metric`) sengaja TIDAK
-> disambungkan: keduanya 0 baris, jadi query-nya hanya menambah round-trip untuk
-> selalu mengembalikan kosong.
+> Dua tabel terakhir (`content_format_daily`, `post_metric`) dulu 0 baris dan
+> karena itu sengaja dilewati. **1 September 2026 keduanya selesai, hulu sampai
+> hilir dalam satu hari:**
+>
+> 1. **Pipeline** — asset Dagster baru `gold_post.py` mengisi keduanya (300 dan
+>    477 baris). Ikut `transform_chain_job`, jadi data L1 baru mengalir ke sana
+>    otomatis setiap sensor `l0_raw` memicu rantai.
+> 2. **UI** — dibaca `kolGold.ts` (7 → 9 query paralel) dan dirender di tab
+>    **Content** halaman `[kolId]`.
+>
+> **Diverifikasi 1 September 2026 sampai lapisan route.** Handler `GET` route
+> `[kolId]` dipanggil langsung (hanya `requireOrgMemberById` yang di-stub),
+> membalas **HTTP 200 `application/json`**, dan body-nya diumpankan ke komponen
+> React sungguhan lewat `renderToStaticMarkup`. Jumlah baris dan nilai agregat
+> di setiap tahap dicocokkan terhadap database untuk 2 creator: **0 selisih**.
+> Dev server sengaja TIDAK dipakai — `src/lib/monitoring/cron.ts` menjadwalkan
+> pekerjaan tiap menit yang bisa memanggil Apify dan menulis ke `l0_raw`.
+>
+> Keduanya menempel di jalur yang sudah ada: tidak ada asset di luar
+> `transform_chain_job`, tidak ada route API baru, tidak ada procedure atau
+> trigger database. Schema `l2_gold` tetap 0 routine dan 0 trigger.
 >
 > Yang tetap berlaku: `postAnalytics.ts` menyebut
 > `l2_gold.comment_sentiment_post`, tapi itu lewat `@/lib/db` (warehouse) dan
@@ -148,14 +166,14 @@ merender tile untuk kolom NULL** supaya tidak ada angka yang mengaku terukur.
 | `audience_demographics_daily` (69) | **Chart demografi audiens** — donut/bar proporsi audiens per `dimension_key`, dengan badge `confidence` karena angkanya hasil inferensi, bukan Insights resmi. **Gender dan umur satu tabel**, dibedakan `audience_type` | ✅ **Tersambung.** `[kolId]` → tab **Audience**, donut **Gender** di kartu "Audience Insights (terukur)". Chart **Age** sudah dikodekan tapi tidak dirender karena `audience_type='age'` masih 0 baris. *`/…/discover/audience` belum.* | Semua kolom 100% terisi: `audience_date`, `audience_type`, `dimension_key`, `audience_count`, `confidence`.<br>**Nilai yang benar-benar ada:** `audience_type` hanya `gender`; `dimension_key` hanya `female`, `male`, `unknown`. **Chart umur belum bisa dibuat** — `audience_type='age'` belum ada satu baris pun | asset `audience_gold` ← `feature.{ig,tt}_audience_analysis` |
 | `audience_geo_daily` (181) | **Peta / bar sebaran lokasi audiens.** Dua tingkat dalam satu tabel lewat `geo_level`: peta choropleth untuk `country`, bar Top-N untuk `city` | ✅ **Tersambung.** Kartu yang sama → bar **Top Countries** (`geo_level='country'`) dan **Top Cities** (`'city'`). *Peta choropleth dan `/…/discover/audience` belum.* | Semua kolom 100%: `audience_date`, `geo_level`, `geo_key`, `audience_count`, `confidence`.<br>**Cakupan nyata:** `country` 113 baris / 32 negara unik; `city` 68 baris / 33 kota unik | asset `audience_gold` ← `feature.{ig,tt}_audience_analysis` |
 | `audience_interest_daily` (214) | **Daftar / bar chart minat audiens** per `interest_key`, diurut `audience_count`. Cocok juga jadi tag cloud atau chip filter di pencarian KOL | ✅ **Tersambung.** Kartu yang sama → chips **Audience Interests** dengan persentase. *Filter minat di listing belum.* | Semua kolom 100%: `audience_date`, `interest_key`, `audience_count`, `confidence`.<br>**Nilai terbanyak:** `unknown` (23), `religion` (22), `parenting` (21), `business` (17), `food` (14), `music` (13), `entertainment` (12), `beauty` (11). Perhatikan `unknown` justru teratas — UI sebaiknya menyembunyikannya atau menandainya "tidak terklasifikasi" | asset `audience_gold` ← `feature.{ig,tt}_audience_analysis` |
-| `content_format_daily` (0) | **Breakdown format konten per hari** — stacked bar `post_count` per `media_type` terhadap `metric_date`, plus perbandingan ER antar format ("Reels vs Carousel mana yang lebih perform"). Kolomnya cermin `kol_metric_daily`, hanya ditambah dimensi `media_type` | ❌ **Sengaja tidak disambungkan** — 0 baris. Rekomendasi kalau nanti terisi: tab **Content** di `[kolId]` dan `/…/discover/content` | **BELUM ADA DATA (0 baris).** Kolom yang tersedia kalau nanti diisi: `metric_date`, `media_type`, `post_count`, `posts_in_sample`, `likes_sum`, `comments_sum`, `shares_sum`, `saves_sum`, `views_sum`, `engagement_sum`, `engagement_public_sum`, `followers_denom_sum`, `er_followers_daily`, `reach_sum`, `er_reach_daily` | **belum diisi asset mana pun** — tidak ada asset Dagster yang menulis ke sini |
-| `post_metric` (0) | **Tabel detail performa per post** — satu baris per konten, bisa diurut `rank_in_account` atau `er_followers`, dengan link `permalink` dan chip `top_hashtags`. Ini yang paling cocok jadi tabel "Top Posts" yang bisa di-sort | ❌ **Sengaja tidak disambungkan** — 0 baris. Rekomendasi kalau nanti terisi: tab **Content** di `[kolId]` (tabel di bawah grid) | **BELUM ADA DATA (0 baris).** Kolom yang tersedia kalau nanti diisi: `content_id`, `posted_at`, `post_date`, `media_type`, `is_sponsored`, `permalink`, `likes_hidden`, `is_collaboration`, `likes`, `comments`, `shares`, `saves`, `views`, `engagement_owned`, `engagement_public`, `followers_at_post_date`, `er_followers`, `rank_in_account`, `top_hashtags`, `reach`, `er_reach`, `reposts`, `avg_watch_time_seconds`, `completion_rate` | **belum diisi asset mana pun.** Sementara ini `feature.{ig,tt}_post_analysis` yang memegang peran serupa |
+| `content_format_daily` (300) | **Breakdown format konten per hari** — stacked bar `post_count` per `media_type` terhadap `metric_date`, plus perbandingan ER antar format ("Reels vs Carousel mana yang lebih perform"). Kolomnya cermin `kol_metric_daily`, hanya ditambah dimensi `media_type` | ✅ **Tersambung.** `[kolId]` → tab **Content**, kartu "Content Format (terukur, L2 Gold)" di kolom kanan `KolCreatorSections.tsx`. `Bars` proporsi post per format + daftar **ER per format**. Menggantikan kartu "Content Format" sampled, tapi HANYA untuk creator yang punya baris L2 — creator lain tetap dapat kartu estimasi yang lama. *`/…/discover/content` belum.* | **300 baris, 30 akun, 6 format** (IG `clips` 89 post / `carousel_container` 67 / `feed` 22 / `unknown` 8; TT `VIDEO` 289 / `CAROUSEL` 2). Kolom: `metric_date`, `media_type`, `post_count`, `posts_in_sample`, `likes_sum`, `comments_sum`, `shares_sum`, `saves_sum`, `views_sum`, `engagement_sum`, `engagement_public_sum`, `followers_denom_sum`, `er_followers_daily`, `reach_sum`, `er_reach_daily` | asset `content_format_daily` ← `l1_silver.unified_post` + `unified_profile`. Rumusnya identik `kol_metric_daily` + dimensi `media_type`; penjumlahan seluruh format per akun-hari dicek cocok terhadap `kol_metric_daily` tiap materialize. **NULL 100%:** `reach_sum`, `er_reach_daily` |
+| `post_metric` (477) | **Tabel detail performa per post** — satu baris per konten, bisa diurut `rank_in_account` atau `er_followers`, dengan link `permalink` dan chip `top_hashtags`. Ini yang paling cocok jadi tabel "Top Posts" yang bisa di-sort | ✅ **Tersambung.** `[kolId]` → tab **Content**, tabel "Top Posts (terukur, L2 Gold)" di atas grid konten. Kolom: peringkat, link post, format, tanggal tayang, likes, comments, views, ER — plus filter format dan tiga urutan (ER tertinggi / terbaru / views). Grid sampled TIDAK dihapus: ia punya cover dan caption yang tidak disimpan `post_metric`. *Belum dipakai di `/…/discover/content`.* | **477 baris** (186 IG + 291 TT, 30 akun). Terisi 100%: `content_id`, `posted_at`, `post_date`, `permalink`, `likes`, `comments`, `engagement_owned`, `engagement_public`; `media_type` 98%; `views` 82%; `top_hashtags` 64%; `shares` & `saves` 61% (TikTok saja); `er_followers` & `rank_in_account` 29%. **NULL 100%:** `reach`, `er_reach`, `reposts`, `avg_watch_time_seconds`, `completion_rate`. Kolom lengkap: `content_id`, `posted_at`, `post_date`, `media_type`, `is_sponsored`, `permalink`, `likes_hidden`, `is_collaboration`, `likes`, `comments`, `shares`, `saves`, `views`, `engagement_owned`, `engagement_public`, `followers_at_post_date`, `er_followers`, `rank_in_account`, `top_hashtags`, `reach`, `er_reach`, `reposts`, `avg_watch_time_seconds`, `completion_rate` | asset `post_metric` ← `l1_silver.unified_post` + `unified_profile` + `feature.{ig,tt}_post_analysis` (untuk `rank_in_account` & `top_hashtags`). SEMUA post ditulis termasuk `likes_hidden`/`is_collaboration`; untuk menyamakan dengan `kol_metric_daily`, saring `WHERE likes_hidden IS NOT TRUE AND is_collaboration IS NOT TRUE` |
 
 ### Jalur L2 → Backend → UI
 
 ```
 l2_gold.*  ──►  src/lib/discover/kolGold.ts        getKolGold(kolId)
-                     │  7 query paralel, join lewat public.kol_social_account
+                     │  9 query paralel, join lewat public.kol_social_account
                      ▼
                 src/lib/discover/kolDirectory.ts   KolCreatorPayload.gold
                      ▼
@@ -164,7 +182,9 @@ l2_gold.*  ──►  src/lib/discover/kolGold.ts        getKolGold(kolId)
                 KolCreatorWorkspace  ──►  SectionProps.gold
                      ├─ ProfileSection    (KolCreatorProfile.tsx)   kol_profile_card
                      ├─ PerformanceSection(KolCreatorSections.tsx)  kol_metric_daily/_monthly
-                     └─ AudienceSection   (KolCreatorSections.tsx)  audience_*_daily
+                     ├─ AudienceSection   (KolCreatorSections.tsx)  audience_*_daily
+                     └─ ContentSection    (KolCreatorSections.tsx)  post_metric,
+                                                                    content_format_daily
 ```
 
 Tidak ada route API baru — L2 menumpang payload yang sudah ada, sama seperti
@@ -172,12 +192,18 @@ Tidak ada route API baru — L2 menumpang payload yang sudah ada, sama seperti
 
 | File | Perubahan |
 |---|---|
-| `src/lib/discover/kolGold.ts` | **baru** — service L2 |
+| `src/lib/discover/kolGold.ts` | **baru** — service L2. *1 Sep:* +2 query (`post_metric`, `content_format_daily`), interface `GoldPost` & `GoldFormatDay` |
 | `src/lib/discover/kolDirectory.ts` | `getKolGold()` masuk `Promise.all`, field `gold` di payload |
-| `src/components/discover/KolCreatorSections.tsx` | `gold` di `SectionProps`; Performance + Audience |
+| `src/components/discover/KolCreatorSections.tsx` | `gold` di `SectionProps`; Performance + Audience. *1 Sep:* `ContentSection` menerima `gold`, komponen `GoldPostsCard` + `GoldFormatsCard` |
 | `src/components/discover/KolCreatorProfile.tsx` | kartu Profile Snapshot |
 | `src/components/discover/KolCreatorWorkspace.tsx` | meneruskan `gold` ke `sectionProps` |
 
+Integrasi 1 September hanya menyentuh **dua** file di atas — `kolGold.ts` dan
+`KolCreatorSections.tsx`. Route API, `kolDirectory.ts`, dan `KolCreatorWorkspace.tsx`
+tidak diubah: `sectionProps` sudah membawa `gold` ke semua section sejak 28
+Agustus, dan `ContentSection` tinggal men-destructure-nya. Loading dan error juga
+tidak bertambah — seluruh payload memakai satu `<CreatorSkeleton/>` dan satu
+`<ErrorBlock/>` di workspace.
 
 **Tiga keputusan yang lahir dari data nyata, bukan dari asumsi:**
 
@@ -215,6 +241,100 @@ TIDAK ada di database `kol` — kalau muncul di dokumen lain, ini padanan yang b
 
 ---
 
+## Rantai end-to-end per domain (kondisi terkini, hasil audit)
+
+Ketiganya berjalan **seluruhnya di database `kol`** — L0, L0 Harmonization, L1,
+Feature, dan L2 tidak pernah menyentuh warehouse/TSDB. Yang menentukan itu bukan
+nama tabel melainkan pool yang menjalankan query: pipeline memakai `PG_*` /
+`KOL_DB_URL` (psycopg2), backend memakai `kolDb()` (`PG_*_KOL`). Beberapa nama
+tabel memang ada di kedua database — lihat catatan di bawah.
+
+### Profile
+
+```
+l0_raw.{ig,tt}_profile_apify
+      └─ sp_sync_{instagram,tiktok}_profile  ──►  l0_harmonization.{instagram,tiktok}_profile
+            └─ sp_build_unified_profile      ──►  l1_silver.unified_profile      (2.001)
+                  └─ asset kol_profile_card  ──►  l2_gold.kol_profile_card       (1.976)
+                        └─ kolGold.ts (kolDb) ──► payload.gold.cards[]
+                              └─ KolCreatorProfile.tsx  "Profile Snapshot (terukur, L2 Gold)"
+```
+
+### Post
+
+```
+l0_raw.{ig_media_snapshots,tt_video}_apify
+      └─ sp_sync_{instagram,tiktok}_post ──► l0_harmonization.{instagram,tiktok}_post
+            └─ sp_build_unified_post     ──► l1_silver.unified_post              (477)
+                  ├─ asset {ig,tt}_post_analysis       ──► feature.*_post_analysis
+                  ├─ asset {ig,tt}_engagement_analysis ──► feature.*_engagement_analysis
+                  ├─ asset post_metric          ──► l2_gold.post_metric          (477)
+                  │     (rank_in_account & top_hashtags diteruskan dari feature)
+                  ├─ asset content_format_daily ──► l2_gold.content_format_daily (300)
+                  └─ asset kol_metric_daily     ──► l2_gold.kol_metric_daily     (280)
+                              └─ kol_metric_monthly ──► l2_gold.kol_metric_monthly (68)
+                        └─ kolGold.ts (kolDb) ──► gold.posts[] / gold.formats[]
+                                                  gold.daily[] / gold.monthly[]
+                              └─ KolCreatorSections.tsx
+                                   tab Content   : GoldPostsCard, GoldFormatsCard
+                                   tab Analytics : PerformanceSection (harian & bulanan)
+```
+
+### Followers / Audience
+
+```
+l0_raw.{ig,tt}_followers_apify
+      └─ sp_sync_{instagram,tiktok}_follower ──► l0_harmonization.*_follower
+            └─ sp_build_unified_follower     ──► l1_silver.unified_follower      (2.548)
+                  └─ asset audience_feature   ──► feature.{ig,tt}_audience_analysis
+                        └─ asset audience_gold ──► l2_gold.audience_demographics_daily (69)
+                                                   l2_gold.audience_geo_daily          (181)
+                                                   l2_gold.audience_interest_daily     (214)
+                              └─ kolGold.ts (kolDb) ──► gold.audience.*
+                                    └─ KolCreatorSections.tsx  tab Audience
+```
+
+`l1_silver.unified_follower` **dipakai** — oleh asset `audience_feature`. Yang
+tidak terjadi adalah backend UI membacanya langsung; UI melihat hasil olahannya
+lewat tabel `l2_gold.audience_*`.
+
+### L2 yang sudah terbukti sampai Backend dan UI
+
+Kedelapan tabel `l2_gold` dibaca `kolGold.ts` lewat `kolDb()` — 9 query paralel,
+nol query lewat pool warehouse.
+
+| Tabel L2 | Baris | Field API | Komponen UI | Bukti |
+|---|---:|---|---|---|
+| `kol_profile_card` | 1.976 | `gold.cards[]` | `KolCreatorProfile` | HTTP 200 + render |
+| `kol_metric_daily` | 280 | `gold.daily[]` | `PerformanceSection` | HTTP 200 + render |
+| `kol_metric_monthly` | 68 | `gold.monthly[]` | `PerformanceSection` | HTTP 200 + render |
+| `audience_demographics_daily` | 69 | `gold.audience.gender/age` | `AudienceSection` | HTTP 200 + render |
+| `audience_geo_daily` | 181 | `gold.audience.countries/cities` | `AudienceSection` | HTTP 200 + render |
+| `audience_interest_daily` | 214 | `gold.audience.interests` | `AudienceSection` | HTTP 200 + render |
+| `post_metric` | 477 | `gold.posts[]` | `GoldPostsCard` | HTTP 200 + render |
+| `content_format_daily` | 300 | `gold.formats[]` | `GoldFormatsCard` | HTTP 200 + render |
+
+Contoh nilai yang dicocokkan tahap demi tahap (`irwansyah_15`):
+`kol_profile_card.followers_count = 14.912.349` di DB → `gold.cards[0].followers
+= 14912349` di body API → **"14.9M"** di markup komponen. Dan
+`SUM(post_metric.likes) = 417.463` di DB → jumlah `gold.posts[].likes` = 417.463
+di API. Untuk `lunamaya`: `37.950.413` → **"38M"**, dan `207.793` → `207.793`.
+
+### Dua perbaikan wiring UI dari audit ini
+
+1. **Jendela 365 hari pada query `formats` dihapus.** Tabel `content_format_daily`
+   dibaca dengan cap tanggal, padahal kartunya menampilkan proporsi format
+   sepanjang periode, bukan deret waktu. Akibatnya **16 baris di 6 akun tidak
+   pernah sampai UI**, dan di tab Content yang sama "Top Posts" menyebut *10
+   post* sementara kartu format merakit dari *8*. Setelah cap dihapus keduanya
+   menyebut angka yang sama. Query `daily` dan `monthly` tetap berjendela —
+   keduanya memang grafik deret waktu.
+2. **Duplikasi Gender/Age dihapus.** Kartu sampel "Audience Demographics" selalu
+   dirender berdampingan dengan versi terukur L2, sehingga tab Audience
+   menampilkan dua donut Gender dengan angka berbeda. Blok sampel kini disembunyikan
+   untuk dimensi yang sudah punya angka L2; **Generation** tetap tampil karena
+   tidak punya padanan L2.
+
 ---
 
 ## Feature Layer
@@ -239,8 +359,8 @@ Statusnya dibedakan tiga:
 | `tt_engagement_analysis` (11) | Sama seperti di atas untuk TikTok, dan **lebih lengkap** — shares/saves/views terisi penuh karena data publik TikTok memuatnya | Panel yang sama, untuk KOL berplatform TikTok | `videos_analyzed_count`, `total_views`, `total_likes`, `total_comments`, `total_shares`, `total_saves`, `best_posting_time_heatmap` **100%**; `engagement_rate` 90%.<br>**NULL 100%:** `engagement_trend` | `l1_silver.unified_post` + `unified_profile` (asset `tt_engagement_analysis`) |
 | `ig_post_analysis` (186) | **Tabel/grid per post Instagram** — daftar konten dengan chip hashtag, penanda sponsored, tipe media, dan peringkat. Peran ini yang seharusnya diambil `l2_gold.post_metric`, tapi sementara tabel inilah satu-satunya yang berisi | Tab **Content** di `[kolId]`, di bawah grid konten | `media_id`, `posted_at` 100%; `media_type` 95%; `is_sponsored` 94%; `top_hashtags` (jsonb) 37%; `engagement_rate` dan `rank` 24%.<br>**NULL 100%:** `content_category`, `category_percentage`, `avg_watch_time_seconds`, `click_through_rate`, `sentiment_breakdown`, `ai_recommendation`, `reach`.<br>⚠️ `engagement_rate` hanya 24% — kalau ditampilkan sebagai kolom tabel, mayoritas barisnya kosong | `l1_silver.unified_post` (asset `ig_post_analysis`) |
 | `tt_post_analysis` (291) | Sama untuk TikTok. Hashtag jauh lebih lengkap daripada Instagram, jadi tag cloud per KOL paling layak dibangun dari sini | Tab **Content** di `[kolId]` | `video_id`, `posted_at`, `media_type`, `is_sponsored` 100%; `top_hashtags` **81%**; `engagement_rate` dan `rank` 32%.<br>**NULL 100%:** `content_category`, `top_sound`, `avg_watch_time_seconds`, `completion_rate`, `traffic_source`, `sentiment_breakdown`, `ai_recommendation` | `l1_silver.unified_post` (asset `tt_post_analysis`) |
-| `ig_audience_analysis` (13) | **Panel kualitas audiens** — tiga skor (quality / authenticity / follower quality) sebagai gauge, plus donut gender, daftar minat, dan sebaran geo. Ini sumber hulu tiga tabel `l2_gold.audience_*`; untuk chart, baca versi L2-nya yang sudah dinormalisasi per baris | Tab **Audience** di `[kolId]`. Untuk chart pakai `l2_gold.audience_*`; tabel ini untuk skor agregat yang tidak ada di L2 | `audience_quality_score`, `authenticity_score`, `follower_quality_score`, `gender_breakdown` (jsonb), `top_interest` (jsonb), `geo_distribution` (jsonb) — semuanya **100%**.<br>**NULL 100%:** `age_gender_breakdown`, `active_hours_heatmap`, `avg_reach`, `cpe`, `emv` | `audience_inference.py` (asset `audience_feature`) ← `l0_raw.ig_followers_apify` |
-| `tt_audience_analysis` (10) | Sama untuk TikTok | Tab **Audience** di `[kolId]` | Kolom dan tingkat isian identik dengan versi Instagram: 6 kolom 100%, 5 kolom NULL | `audience_inference.py` (asset `audience_feature`) ← `l0_raw.tt_followers_apify` |
+| `ig_audience_analysis` (13) | **Panel kualitas audiens** — tiga skor (quality / authenticity / follower quality) sebagai gauge, plus donut gender, daftar minat, dan sebaran geo. Ini sumber hulu tiga tabel `l2_gold.audience_*`; untuk chart, baca versi L2-nya yang sudah dinormalisasi per baris | Tab **Audience** di `[kolId]`. Untuk chart pakai `l2_gold.audience_*`; tabel ini untuk skor agregat yang tidak ada di L2 | `audience_quality_score`, `authenticity_score`, `follower_quality_score`, `gender_breakdown` (jsonb), `top_interest` (jsonb), `geo_distribution` (jsonb) — semuanya **100%**.<br>**NULL 100%:** `age_gender_breakdown`, `active_hours_heatmap`, `avg_reach`, `cpe`, `emv` | asset `audience_feature` ← **`l1_silver.unified_follower`** (aturan inferensi di `audience_inference.py`) |
+| `tt_audience_analysis` (10) | Sama untuk TikTok | Tab **Audience** di `[kolId]` | Kolom dan tingkat isian identik dengan versi Instagram: 6 kolom 100%, 5 kolom NULL | asset `audience_feature` ← **`l1_silver.unified_follower`** (platform dibedakan di dalam asset) |
 
 ### 🔴 Datanya masih kosong
 
@@ -273,7 +393,33 @@ kolom per-akun di tabel L1/L2 di atas.
 
 ---
 
-## Isi `transform_chain_job` (13 asset)
+## Rate Card — BELUM DIKERJAKAN
+
+`l1_silver.unified_rate_card` **kosong (0 baris)** dan tabel `l0_harmonization.
+{instagram,tiktok}_rate_card` juga 0. Backend sudah membacanya lewat `kolDb()`
+(`kolDirectory.ts`, `kolMeasured.ts`), jadi **wiring-nya benar dan tidak perlu
+diubah** — yang belum ada adalah datanya. UI menampilkan "belum ada rate card di
+database KOL", yang memang jujur terhadap keadaan sekarang.
+
+Rate Card sengaja belum dipopulasi karena nanti akan mengikuti alurnya sendiri,
+bukan jalur scraping:
+
+```
+UI Vio  →  Backend  →  l0_raw  →  pipeline  →  l1_silver  →  l2_gold  →  UI
+```
+
+Artinya harga masuk dari input di UI Vio, mendarat di L0 seperti sumber lain,
+lalu naik lewat rantai transformasi yang sama. Sampai jalur itu dibangun, jangan
+menambal `unified_rate_card` dengan impor manual — hasilnya akan ditimpa begitu
+pipeline resminya jalan.
+
+Catatan terpisah: harga yang di-set agency dari UI saat ini disimpan di
+**warehouse** (`public.discover_roster_rate_cards`), bukan di database `kol`.
+Itu jalur komersial yang berbeda dan berada di luar pipeline ini.
+
+---
+
+## Isi `transform_chain_job` (15 asset)
 
 Urutan dijaga Dagster lewat `deps` antar-asset, bukan urutan daftar.
 
@@ -285,11 +431,12 @@ l1_silver          unified_profile ─────────┘               
                                         │
 feature            ig/tt_engagement_analysis   ig/tt_post_analysis
 l2_gold            kol_profile_card   kol_metric_daily ──► kol_metric_monthly
+                   post_metric        content_format_daily
 ```
 
 Asset follower (`instagram_follower`, `tiktok_follower`, `unified_follower`) dan
 audiens (`audience_feature`, `audience_gold`) terdaftar di Dagster tapi **tidak**
-termasuk 13 asset `transform_chain_job` — dijalankan terpisah.
+termasuk 15 asset `transform_chain_job` — dijalankan terpisah.
 
 ---
 
@@ -303,7 +450,10 @@ termasuk 13 asset `transform_chain_job` — dijalankan terpisah.
 | `l0_raw` → sensor | ✅ terverifikasi (negatif) | L0 tidak berubah ⇒ sensor tetap `SKIPPED`, `runIds=[]`, run Dagster tetap 7 |
 | sensor → L1 → Feature → L2 | ⚠️ belum diuji dengan data baru | Butuh satu scraping yang benar-benar mendarat di L0. Tabel L1/Feature/L2 sudah terisi dari muatan awal, tapi belum pernah diisi lewat pemicu sensor |
 | L1 → UI | ✅ terverifikasi lewat kode | `unified_profile`, `unified_post`, `unified_rate_card` dibaca `kolDirectory.ts`, `kolMeasured.ts`, `creatorProfiling.ts`, `kolPostCover.ts` |
-| L2 → UI | ✅ terverifikasi di browser | 6 tabel dibaca `src/lib/discover/kolGold.ts`, dirender 3 section di `[kolId]`. Diverifikasi dengan screenshot headless Chrome pada data nyata: kartu profil `@irwansyah_15` 14.9M followers, grafik harian `mel_josh_claire` 2026-07-13…08-28 (Post 8, Engagement 13K, Views 350,9K), donut gender female 71,8%/male 28,2%. **Masih uncommitted di clone lokal** |
+| L2 → UI (6 tabel pertama) | ✅ terverifikasi di browser | Dirender 3 section di `[kolId]`. Screenshot headless Chrome pada data nyata: kartu profil `@irwansyah_15` 14.9M followers, grafik harian `mel_josh_claire` 2026-07-13…08-28 (Post 8, Engagement 13K, Views 350,9K), donut gender female 71,8%/male 28,2%. **Masih uncommitted di clone lokal** |
+| L2 → Backend → API (8 tabel) | ✅ terverifikasi sampai route | Handler `GET` route `[kolId]` dipanggil langsung → **HTTP 200 `application/json`**. Jumlah baris `gold.cards/daily/monthly/posts/formats` dan `SUM(posts.likes)` cocok dengan database untuk 2 creator, 0 selisih. |
+| API → UI (render komponen) | ✅ terverifikasi | Body API diumpankan ke `ProfileSection`, `PerformanceSection`, `AudienceSection`, `ContentSection` lewat `renderToStaticMarkup`. Markup memuat nilai yang benar (mis. `14.9M`, `10 post dari pipeline`, ketiga `media_type`). 0 assertion gagal. |
+| UI di browser sungguhan | ⚠️ **UNVERIFIED** | Butuh `.env.local` (tidak ada di repo, tidak pernah di GitHub) dan cron di `monitoring/cron.ts` harus dimatikan dulu supaya dev server tidak memicu Apify. Yang belum teruji: CSS/layout dan interaksi klien (filter & sort ber-`useState`). **Masih uncommitted di clone lokal** |
 
 ### Kenapa dua scraping 28 Agustus gagal
 

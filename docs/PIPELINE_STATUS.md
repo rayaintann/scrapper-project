@@ -84,8 +84,8 @@ sampai L2. Story, Comment, Tagged Post, dan Brand Fit belum ada datanya.
 | **Tagged Post** | Tabel ada, isi 0 | Scraper |
 | **Audience terukur** | Jalur lengkap (`ig_profile_official` → `unified_audience`), isi 0 | **Instagram Insights API** (business account + token) |
 | **Brand Fit** | Tabel ada, isi 0 | `public.brand` masih 0 baris |
-| `content_format_daily` | Sumber **sudah siap** | Asset Dagster |
-| `post_metric` | Sumber **sudah siap** | Asset Dagster |
+| `content_format_daily` | ✅ **Terisi** 300 baris (1 Sep 2026) | — sambungan UI |
+| `post_metric` | ✅ **Terisi** 477 baris (1 Sep 2026) | — sambungan UI |
 
 ---
 
@@ -116,13 +116,14 @@ pengambilan. Karena sekarang cuma satu, kita tidak bisa menjawab:
 Ini lebih berharga daripada menambah data baru apa pun — data yang sudah ada
 otomatis jadi jauh lebih berguna hanya karena diambil berulang.
 
-### 2. Ada 2 tabel yang tinggal diisi, gratis
+### 2. ~~Ada 2 tabel yang tinggal diisi, gratis~~ — SELESAI 1 Sep 2026
 
-**Masalahnya.** `content_format_daily` dan `post_metric` masih kosong.
+`content_format_daily` (300 baris) dan `post_metric` (477 baris) sudah diisi
+asset Dagster `gold_post.py`, tanpa biaya scraping sepeser pun. Keduanya ikut
+`transform_chain_job`, jadi data L1 baru mengalir ke sana otomatis lewat sensor
+`l0_raw`.
 
-**Kenapa penting.** Bahan-bahannya **sudah ada semua** di database. Yang belum
-dibuat cuma kode pengisinya. Jadi ini pekerjaan yang hasilnya langsung terlihat
-**tanpa keluar biaya scraping sepeser pun**.
+**Sisanya:** menyambungkan keduanya ke UI (`kolGold.ts` di repo `engkol_v1`).
 
 ### 3. Beberapa data memang tidak bisa didapat dari scraping biasa
 

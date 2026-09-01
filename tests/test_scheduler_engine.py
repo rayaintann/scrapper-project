@@ -704,7 +704,7 @@ class OneShotJobMeneruskanKeGold(unittest.TestCase):
         self.assertTrue(hasil.success)
         self.assertEqual(urutan, ["scrape", "transform"])
         keluaran = hasil.output_for_node("transform_to_gold")
-        self.assertEqual(keluaran["asset_dimaterialisasi"], 13)
+        self.assertEqual(keluaran["asset_dimaterialisasi"], 15)
 
     def test_transform_TIDAK_jalan_kalau_scrape_gagal(self):
         urutan = []

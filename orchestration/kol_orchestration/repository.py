@@ -5,7 +5,7 @@ Di sinilah seluruh asset, job, schedule, sensor, dan resource didaftarkan.
 
 FASE 5 (awal) — L2 Gold pertama, di atas jalur Fase 1b yang sudah lengkap.
 
-Terdaftar sekarang (18 asset):
+Terdaftar sekarang (20 asset):
     l0_harmonization
         instagram_profile        @asset      CALL sp_sync_instagram_profile()
         tiktok_profile           @asset      CALL sp_sync_tiktok_profile()
@@ -22,6 +22,9 @@ Terdaftar sekarang (18 asset):
         tt_post_analysis         @asset      grain: social_account_id + video_id
     l2_gold
         kol_metric_daily         @asset      grain: akun + platform + tanggal tayang
+        post_metric              @asset      grain: akun + platform + content_id
+        content_format_daily     @asset      grain: akun + platform + tanggal
+                                             + media_type
 
 Dua AssetSpec L1 dari Fase 1a diganti @asset bernama sama, jadi jumlah asset
 bertambah 4 (bukan 6): unified_profile dan unified_post sudah terdaftar sejak
@@ -58,7 +61,7 @@ Rencana berikutnya (lihat rancangan arsitektur):
     Fase 2   cpe
     Fase 3   comments / follower / Insights
     Fase 4   metrik yang menunggu definisi algoritma
-    Fase 5   L2 Gold lanjutan (kol_metric_monthly, post_metric, audience)
+    Fase 5   L2 Gold lanjutan (audience lanjutan, brand_fit, comments)
 
 KREDENSIAL — tidak pernah ditulis di kode.
 Dibaca dari environment (file `.env` di root project, sudah di-.gitignore):
@@ -86,6 +89,7 @@ from kol_orchestration.assets.silver import silver_assets
 from kol_orchestration.assets.feature_engagement import feature_engagement_assets
 from kol_orchestration.assets.feature_post import feature_post_assets
 from kol_orchestration.assets.gold import gold_assets
+from kol_orchestration.assets.gold_post import gold_post_assets
 from kol_orchestration.assets.gold_profile import gold_profile_assets
 from kol_orchestration.assets.followers import follower_assets
 from kol_orchestration.assets.audience import audience_assets
@@ -136,6 +140,7 @@ defs = Definitions(
         *feature_engagement_assets,  # feature: engagement per akun (Fase 1a)
         *feature_post_assets,        # feature: analisis per post (Fase 1c)
         *gold_assets,                # l2_gold: rekap harian per KOL (SCRUM-513)
+        *gold_post_assets,           # l2_gold: per konten + per format (SCRUM-515/517)
         *gold_profile_assets,        # l2_gold: kartu profil per KOL (SCRUM-514)
         *follower_assets,            # l0_harm + l1: rantai daftar follower
         *audience_assets,            # feature + l2_gold: audiens hasil inferensi

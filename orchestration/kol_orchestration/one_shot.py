@@ -98,6 +98,8 @@ TRANSFORM_ASSETS = (
     "kol_profile_card",
     "kol_metric_daily",
     "kol_metric_monthly",
+    "post_metric",
+    "content_format_daily",
 )
 
 
@@ -115,6 +117,7 @@ def _semua_asset():
     from kol_orchestration.assets.feature_post import feature_post_assets
     from kol_orchestration.assets.followers import follower_assets
     from kol_orchestration.assets.gold import gold_assets
+    from kol_orchestration.assets.gold_post import gold_post_assets
     from kol_orchestration.assets.gold_profile import gold_profile_assets
     from kol_orchestration.assets.harmonization import harmonization_assets
     from kol_orchestration.assets.silver import silver_assets
@@ -122,13 +125,13 @@ def _semua_asset():
     return [
         *harmonization_assets, *silver_assets,
         *feature_engagement_assets, *feature_post_assets,
-        *gold_assets, *gold_profile_assets,
+        *gold_assets, *gold_post_assets, *gold_profile_assets,
         *follower_assets, *audience_assets,
     ]
 
 
 def jalankan_transform_chain(logger=None):
-    """Materialize 13 asset L0 Harmonization -> L2 Gold. Tidak memanggil actor.
+    """Materialize 15 asset L0 Harmonization -> L2 Gold. Tidak memanggil actor.
 
     Memakai definisi asset yang sama persis dengan yang dipakai UI Dagster, jadi
     tidak ada perhitungan metric yang ditulis ulang di sini. Urutan antar layer
