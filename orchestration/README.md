@@ -38,7 +38,10 @@ schema tapi **belum punya asset** — lihat catatan di bawah graf dependency.
 | `.env.example` | Contoh variabel environment. Nilai asli ada di `.env` root, yang sudah di-`.gitignore` |
 | `cek_koneksi.py` | Verifikasi koneksi, **read-only** |
 | `kol_orchestration/resources.py` | Koneksi database `kol` — `call_procedure()`, `call_function()`, `count_rows()`, `scalar()` |
-| `kol_orchestration/repository.py` | `Definitions` — daftar asset, job, schedule, resource |
+| `kol_orchestration/repository.py` | `Definitions` — daftar asset, job, sensor, resource (`schedules` sengaja kosong) |
+| `kol_orchestration/one_shot.py` | `one_shot_scrape_job` (berbiaya) dan `transform_chain_job` (gratis) |
+| `kol_orchestration/sensors.py` | `l0_raw_new_data_sensor` — auto-trigger `transform_chain_job` saat ada data baru di `l0_raw` |
+| `service/` | Scheduled Task Windows supaya daemon Dagster hidup sendiri (persistent, tahan restart) |
 | `kol_orchestration/assets/harmonization.py` | 4 asset `l0_harmonization` — memanggil `sp_sync_*()` |
 | `kol_orchestration/assets/silver.py` | 2 asset `l1_silver` — memanggil `sp_build_unified_*()` |
 | `kol_orchestration/assets/feature_engagement.py` | `ig/tt_engagement_analysis` |
@@ -133,6 +136,95 @@ cd orchestration
 
 Dagster menjaga urutannya sendiri: memilih `kol_metric_monthly` saja tidak akan
 menjalankan ulang yang harian, tapi memilih keduanya menjalankan daily lebih dulu.
+
+---
+
+## Auto-trigger L0 RAW → L2 Gold (sensor, bukan cron)
+
+`l0_raw_new_data_sensor` di `kol_orchestration/sensors.py` menyambungkan data baru
+di `l0_raw` ke rantai transformasi, **tanpa satu pun schedule/cron**:
+
+```
+scraper (di luar Dagster)  →  l0_raw  →  [sensor]  →  transform_chain_job
+                                                       L0 Harmonization
+                                                       → L1 Silver
+                                                       → Feature
+                                                       → L2 Gold
+```
+
+**Sensor tidak pernah memanggil Apify.** Yang dijalankannya hanya satu `SELECT`
+agregat read-only, lalu `transform_chain_job` yang isinya murni SQL. Scraping
+tetap terpisah di `one_shot_scrape_job` / `scheduler_engine.py`.
+
+### Bagaimana "data baru" dikenali
+
+Per tabel diambil sidik jari **`(count(*), max(fetched_at))`** dari 8 tabel sumber:
+
+| | |
+|---|---|
+| `ig_profile_apify` | `ig_profile_official` |
+| `tt_profile_apify` | `tt_profile_official` |
+| `ig_media_snapshots_apify` | `ig_media_snapshots_official` |
+| `tt_video_apify` | `tt_video_official` |
+
+Alasan memilih keduanya:
+
+- **`count(*)`** — seluruh penulis `l0_raw` (`raw_store.py`, `post_raw_store.py`,
+  `tt_raw_store.py`) hanya `INSERT`; tidak ada satu pun `ON CONFLICT … DO UPDATE`
+  ke schema ini. Tabelnya append-only, jadi jumlah baris naik **tepat** saat ada
+  data baru dan diam saat tidak ada.
+- **`max(fetched_at)`** — diisi `datetime.now(utc)` **sekali** ketika baris
+  mendarat di database, lalu tidak pernah di-update. Stabil untuk data yang sama.
+  Menangkap kasus langka `count(*)` kebetulan sama.
+
+Yang **tidak** dipakai, dan kenapa:
+
+| Kandidat | Alasan ditolak |
+|---|---|
+| `id` | `DEFAULT gen_random_uuid()` — acak, tidak monoton, bukan watermark |
+| `scrape_run_id` | uuid acak juga, tidak bisa diurutkan |
+| `now()` / waktu tick | selalu berubah → sensor trigger terus walau data diam |
+| ukuran/mtime tabel | ikut berubah karena `VACUUM`/`ANALYZE` |
+
+### Anti-trigger berulang
+
+Dua lapis, keduanya mekanisme bawaan Dagster — **tidak ada tabel logging baru**:
+
+1. **Cursor sensor.** Sidik jari terakhir disimpan di `SensorResult(cursor=…)`.
+   Sidik jari sama → `SkipReason`, tidak ada run.
+2. **`run_key`.** Hash dari sidik jari itu sendiri. Dagster menolak run kedua
+   dengan `run_key` yang sudah pernah dipakai — jadi cursor hilang pun, keadaan
+   data yang sama tidak ditransformasi dua kali.
+
+### Tick pertama = baseline
+
+Saat cursor masih kosong sensor belum punya pembanding, jadi tick pertama hanya
+**mencatat** sidik jari dan skip. Kalau data L0 yang sudah ada belum pernah
+diolah, jalankan `transform_chain_job` manual sekali — job itu gratis dan idempoten.
+
+### Menyalakan sensor
+
+Sensor butuh **daemon** Dagster; tanpa proses itu ia tidak pernah dievaluasi,
+walau statusnya `RUNNING` di UI. Untuk pemakaian sehari-hari daemon dijalankan
+sebagai Scheduled Task supaya hidup sendiri — lihat
+[`service/README.md`](service/README.md):
+
+```powershell
+.\orchestration\service\pasang_task_windows.ps1     # sekali saja
+Start-ScheduledTask -TaskPath '\KOL Pipeline' -TaskName 'KOL Dagster Daemon'
+```
+
+`dagster dev` tetap berguna untuk pengembangan, tapi bukan cara menjalankannya
+secara persisten: ia mati bersama terminal pemanggilnya.
+
+`minimum_interval_seconds = 60` adalah **jeda antar-pengecekan, bukan jadwal**:
+tanpa data baru tidak ada run, seberapa sering pun sensor dievaluasi.
+
+Tes offline (tanpa Apify, tanpa Postgres):
+
+```powershell
+.env\Scripts\python.exe -m unittest tests.test_l0_raw_sensor
+```
 
 ---
 

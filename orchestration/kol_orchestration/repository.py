@@ -38,8 +38,17 @@ JOB ONE-SHOT (bukan asset, TIDAK ada schedule)
     transform_chain_job    job   GRATIS — asset job L0 Harmonization -> L1
                                  Silver -> Feature -> L2 Gold. Aman diulang.
 
+SENSOR (event-based, BUKAN schedule)
+    l0_raw_new_data_sensor  sensor  Memantau 8 tabel sumber `l0_raw` lewat
+                                    sidik jari (count(*), max(fetched_at)).
+                                    Kalau ada baris baru -> menjalankan
+                                    `transform_chain_job`. GRATIS: tidak pernah
+                                    memanggil Apify. Anti-trigger-ganda lewat
+                                    cursor sensor + run_key. Lihat `sensors.py`.
+
 Tidak ada `ScheduleDefinition` sama sekali: requirement cron 5 menit dibatalkan,
-dan tidak boleh ada jalur yang memanggil actor sendiri.
+dan tidak boleh ada jalur yang memanggil actor sendiri. Otomatisasi transformasi
+dikerjakan sensor di atas, yang bereaksi pada DATA, bukan pada jam dinding.
 
 Job scraping sengaja TIDAK jadi asset: ia memanggil Apify dan ditagih per hasil,
 sedangkan asset di atas semuanya transformasi murah yang boleh diulang. Lihat
@@ -81,6 +90,7 @@ from kol_orchestration.assets.gold_profile import gold_profile_assets
 from kol_orchestration.assets.followers import follower_assets
 from kol_orchestration.assets.audience import audience_assets
 from kol_orchestration.one_shot import one_shot_jobs, one_shot_schedules
+from kol_orchestration.sensors import l0_raw_sensors
 
 # .env ada di root project (satu tingkat di atas folder orchestration/).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -133,6 +143,10 @@ defs = Definitions(
     jobs=one_shot_jobs,
     # Sengaja kosong: tidak ada schedule/cron apa pun di project ini.
     schedules=one_shot_schedules,
+    # Event-based, bukan waktu-based. Lihat sensors.py: memantau baris baru di
+    # 8 tabel sumber l0_raw, lalu menjalankan transform_chain_job. Tidak pernah
+    # memanggil Apify.
+    sensors=l0_raw_sensors,
     resources={
         "postgres": PostgresResource(
             connection_string=_build_connection_string(),

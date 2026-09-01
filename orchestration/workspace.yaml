@@ -1,4 +1,35 @@
 # Memberi tahu Dagster di mana objek `Definitions` berada.
-# Modul ini di-import, BUKAN dijalankan sebagai script.
+#
+# MENGARAH KE CODE SERVER TERPISAH, BUKAN `python_module`
+# =======================================================
+# Dulu baris ini `python_module: kol_orchestration.repository`, artinya tiap
+# proses (daemon, webserver) MEN-SPAWN code server-nya sendiri sebagai proses
+# anak yang dikelola. Masalahnya, code server terkelola itu dijalankan dengan
+# `--heartbeat --heartbeat-timeout 20`, dan `DAEMON_GRPC_SERVER_HEARTBEAT_TTL`
+# di Dagster nilainya 20 detik dan TIDAK bisa dikonfigurasi lewat dagster.yaml.
+#
+# Daemon hanya memegang code location selama satu tick berlangsung. Karena
+# `l0_raw_new_data_sensor` dievaluasi tiap 60 detik, ada ~40 detik tanpa
+# heartbeat, sehingga code server mematikan diri tiap siklus:
+#
+#     dagster.code_server - WARNING - No heartbeat received in 20 seconds
+#
+# Tick berikutnya lalu men-spawn server baru dan mengimpor ulang seluruh modul
+# `kol_orchestration.repository` — termasuk `scheduler_engine` dan
+# `audience_inference` yang berat. Boros, dan pernah membuat satu tick
+# menggantung.
+#
+# Dengan menjalankan code server sendiri TANPA `--heartbeat` (lihat
+# `service/jalankan_dagster.ps1 -Peran codeserver`), server hidup terus dan
+# daemon cukup menyambung sebagai klien. Impor modul terjadi SEKALI saat server
+# start, bukan tiap tick.
+#
+# `location_name` WAJIB sama persis dengan nama lama. Status sensor (RUNNING)
+# dan cursor-nya disimpan Dagster dengan kunci nama location; kalau namanya
+# berubah, sensor dianggap baru — status kembali STOPPED dan cursor hilang,
+# sehingga tick berikutnya jadi baseline lagi.
 load_from:
-  - python_module: kol_orchestration.repository
+  - grpc_server:
+      host: 127.0.0.1
+      port: 4266
+      location_name: "kol_orchestration.repository"
