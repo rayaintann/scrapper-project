@@ -8,6 +8,17 @@ Cakupan dokumen ini saat ini: **Growth Classification**, **Rising Creator**, dan
 **Monitoring Priority**.
 Filter lain menyusul; jangan anggap dokumen ini lengkap untuk seluruh Discovery.
 
+> **UPDATE 2026-09-07.** Dua hal berubah sejak dokumen ini ditulis:
+>
+> 1. **Ambang `public.kol_tiers` sudah dibetulkan** (migration 033) — angka yang
+>    tertulis di §"Yang perlu dilihat sekali lagi" sudah **usang**, lihat koreksinya
+>    di sana.
+> 2. **Growth sudah tayang di Discovery**, tapi **bukan** `growth_30d` yang
+>    direncanakan di T1. Yang tayang adalah `followers_growth` apa adanya, berlabel
+>    "Sejak Snapshot Terakhir". **T1 tetap blocked** dan tetap relevan — lihat §3 T1.
+>
+> Monitoring Priority tidak terpengaruh sama sekali.
+
 ---
 
 ## 1. Ringkasan untuk yang buru-buru
@@ -51,6 +62,19 @@ Filter lain menyusul; jangan anggap dokumen ini lengkap untuk seluruh Discovery.
 
 Hitung dari deret snapshot, **jangan** pakai `followers_growth` yang tersimpan
 (alasannya di §5).
+
+> **UPDATE 2026-09-07 — jangan tertukar antara dua hal ini.**
+>
+> | | `growth_30d` (T1, dokumen ini) | Growth yang sudah tayang |
+> |---|---|---|
+> | Periode | tepat 30 hari | jarak antar snapshot (10–13 hari) |
+> | Sumber | dihitung dari deret snapshot | `kol_profile_card.followers_growth` apa adanya |
+> | Status | **masih blocked** — butuh history | **sudah tayang** di list, filter, dan Detail |
+> | Label di UI | belum ada | **"Sejak Snapshot Terakhir"** |
+>
+> Larangan di paragraf atas **tetap berlaku untuk T1**: kalau nanti membangun
+> `growth_30d`, hitung dari deret snapshot, jangan pakai kolom tersimpan. Yang tayang
+> sekarang bukan T1 dan tidak menggantikannya.
 
 ```sql
 -- Untuk tiap akun: bandingkan snapshot terbaru dengan snapshot terdekat
@@ -267,7 +291,7 @@ ditambahkan.**
 | Sumber | Isi | Kenapa perlu dicek dulu |
 |---|---|---|
 | `public.agency_kol_accounts` | **7.719 baris**, FK ke `kol_directory` | Punya `status`, `is_active`, `campaign_tag`, `notes` — semuanya **kosong atau seragam** (`status`=`active` & `is_active`=`true` untuk seluruh 7.719; `campaign_tag` 0; `notes` 0). Seluruh isinya satu batch impor 2026-08-27 dan **tidak pernah diubah** (`updated_at` terisi 1 dari 7.719). **Kalau kolom-kolom itu memang untuk "KOL dikelola/dipantau", tabel baru tidak perlu** |
-| `public.kol_tiers` | 5 baris | **Bukan** `refresh_tier`. Ini tier **ukuran creator**: Nano 1.000–9.999 · Micro 10.000–49.999 · Mid-tier 50.000–99.999 · Macro 100.000–999.999 · Mega ≥1.000.000. Dirujuk `agency_kol_accounts.tier_id` (7.207 terisi). **Jangan tertukar** |
+| `public.kol_tiers` | 5 baris | **Bukan** `refresh_tier`. Ini tier **ukuran creator**. **UPDATE 2026-09-07 — ambangnya sudah dibetulkan (migration 033):** Nano 1.000–9.999 · Micro 10.000–49.999 · **Mid-tier 50.000–499.999** · **Macro 500.000–999.999** · Mega ≥1.000.000. *(Angka lama yang salah: Mid-tier 50.000–99.999, Macro 100.000–999.999.)* Dirujuk `agency_kol_accounts.tier_id` (7.207 terisi) — itu sebabnya perbaikan dilakukan lewat `UPDATE`, bukan hapus-lalu-isi. **Jangan tertukar** |
 | `l2_gold.kol_profile_card.media_count` | 1.950 / 1.976 | Proxy aktivitas paling luas (25,26% populasi), tapi **kumulatif seumur akun**, bukan recency — perlu 2 snapshot untuk jadi sinyal, dan itu hanya ada untuk 25 akun |
 
 ### Yang TIDAK ada sama sekali

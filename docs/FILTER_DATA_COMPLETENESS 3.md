@@ -21,6 +21,21 @@
 > Detail di **§Revisi 2026-09-06** di akhir dokumen. Coverage final:
 > `docs/KOL_DISCOVERY_TASK5_DESIGN.md` §3.
 
+> ### Revisi kedua — 2026-09-07 (implementasi)
+>
+> Sejak revisi di atas, empat hal **sudah dikerjakan dan diverifikasi**, bukan lagi temuan:
+>
+> 1. **Batas tier `kol_tiers` dibetulkan** (migration 033) — §5.5 tidak lagi menggambarkan
+>    dua ambang yang bertentangan.
+> 2. **P-01 ditutup** (migration 034) — 54 KOL di bawah 1rb tidak lagi bertier `Nano`.
+> 3. **Connected dipasang**, **Verified dihapus** dari Discovery — "Verified only" di
+>    rekapitulasi MISSING sekarang bukan lagi filter yang direncanakan.
+> 4. **Growth dikirim ke UI** memakai `followers_growth` (25 KOL), berlabel
+>    "Sejak Snapshot Terakhir".
+>
+> Detail di **§Revisi 2026-09-07** di akhir dokumen. Kalau bertentangan dengan §1–§6
+> maupun dengan revisi 2026-09-06, **section terbaru yang berlaku**.
+
 ---
 
 ## 1. Scope & Denominator
@@ -638,6 +653,10 @@ diverifikasi lebih dulu.
 
 ### 5.5 Batas tier UI berbeda dari tabel `kol_tiers`
 
+> **✅ RESOLVED 2026-09-07** — migration 033 membetulkan ambang di `kol_tiers`,
+> sehingga UI dan tabel sekarang memakai angka yang sama. Tabel di bawah dibiarkan
+> sebagai catatan temuan. Detail dan angka sesudahnya di **§Revisi 2026-09-07 · I1**.
+
 | Tier | Batas UI *(tooltip prototype)* | Batas `public.kol_tiers` |
 |---|---|---|
 | Nano | 1K–10K | 1.000–9.999 ✅ |
@@ -916,3 +935,120 @@ query; kolom join yang benar `category_ids`, bukan `category_id`)*.
 | §6.5 "yang bisa dipakai hari ini" | 5 filter | **6** — tambah Kategori lewat taxonomy; Last Updated tetap masuk tapi **dengan catatan semantik** |
 
 Coverage final per field: `docs/KOL_DISCOVERY_TASK5_DESIGN.md` §3.
+
+---
+
+# Revisi — 2026-09-07 (implementasi)
+
+Sumber: migration `033`, `034` · `tests/test_discovery_tier_growth.py` ·
+verifikasi end-to-end 2026-09-07 (SQL dijalankan langsung ke database `kol`,
+query diekstrak dari `kolDirectory.ts` yang di-ship).
+
+> Berbeda dari revisi 2026-09-06 yang ditulis tanpa akses database, section ini
+> **dihitung ulang lewat query nyata**. §1–§6 dan revisi 2026-09-06 tetap dibiarkan
+> apa adanya sebagai audit trail; kalau bertentangan, **section ini yang berlaku**.
+
+## I1 — Batas tier: dua ambang yang bertentangan sudah tidak ada
+
+§5.5 dan revisi R2 menyoroti bahwa batas tier di UI berbeda dari tabel `kol_tiers`.
+Penyebabnya sekarang dihapus di sumbernya.
+
+| Tier | Batas lama di `kol_tiers` | Batas sekarang |
+|---|---|---|
+| **Mid-tier** | 50.000 – **99.999** | 50.000 – **499.999** |
+| **Macro** | **100.000** – 999.999 | **500.000** – 999.999 |
+
+Nano, Micro, Mega tidak berubah. Diperbaiki lewat `UPDATE` — bukan hapus-lalu-isi —
+karena `agency_kol_accounts.tier_id` punya foreign key ke `kol_tiers.id`.
+
+Dampak terukur, dihitung dari `kol_directory` (denominator 7.720, populasi aktif):
+
+| Tier | Sebelum | Sesudah | Selisih |
+|---|---:|---:|---:|
+| Nano | 1.943 | 1.943 | 0 |
+| Micro | 2.942 | 2.942 | 0 |
+| **Mid-tier** | 706 | **1.809** | **+1.103** |
+| **Macro** | 1.290 | **187** | **−1.103** |
+| Mega | 313 | 313 | 0 |
+| Tanpa tier | 526 | 526 | 0 |
+
+Angka **1.809 / 187** yang sudah tertulis di §5.5 dan di tabel bucket UI ternyata benar —
+itu memang hasil dengan ambang yang disepakati. Yang dulu salah adalah isi tabel
+`kol_tiers`, dan sekarang keduanya sudah sama.
+
+## I2 — P-01 ditutup: di bawah 1rb tidak lagi masuk Nano
+
+Yang tidak terlihat di dokumen ini: `l1_silver` dan `l2_gold` diam-diam memberi tier
+`Nano` kepada KOL yang followernya di bawah 1.000, lewat `COALESCE` fallback di
+`sp_build_unified_profile()`. UI tidak pernah begitu — ia memakai `LEFT JOIN kol_tiers`
+tanpa fallback, sehingga menghasilkan tier kosong. Jadi selama ini UI benar dan L1/L2 salah.
+
+| | Sebelum | Sesudah |
+|---|---:|---:|
+| L1 follower di bawah 1rb bertier `Nano` | 54 | **0** |
+| L2 follower di bawah 1rb bertier `Nano` | 54 | **0** |
+| L1 follower di bawah 1rb tier NULL | 0 | **54** |
+| L1 follower NULL bertier | 0 | 0 |
+
+Keputusan produk: **tidak** dibuatkan kelompok `Unclassified` maupun `Unknown`.
+Populasi 526 (304 di bawah 1rb + 222 tanpa data) tetap 526 dan tetap harus dihitung
+sebagai kelompok tanpa tier — jangan dibuang diam-diam dari hasil filter.
+
+## I3 — Verified keluar dari daftar filter
+
+Rekapitulasi §Ringkasan Status mencatat **Verified only** sebagai MISSING (relationship
+7.496, data 0). Status itu sekarang tidak relevan: **Verified dihapus dari Discovery**
+atas keputusan produk. Badge platform (`verified_status`: 454 verified) tidak
+dipertahankan sebagai field terpisah.
+
+Penggantinya **Connected**, dengan definisi bisnis:
+
+```
+social_account.platform_user_id IS NOT NULL AND social_account.oauth_token IS NOT NULL
+```
+
+Hasil hari ini **0 dari 7.720**, dan itu benar — belum ada kreator yang menghubungkan
+akun. Chip-nya akan selalu kosong sampai connect flow berjalan; ini bukan kegagalan
+coverage, dan tidak perlu dihitung sebagai filter MISSING yang menunggu data.
+
+## I4 — Growth: statusnya berubah, angkanya tidak
+
+§3.5 menulis Growth Classification **DERIVED — INCOMPLETE**, 25 KOL · 0,32%.
+**Angka itu masih persis sama.** Yang berubah cuma keputusan produk: growth
+**boleh dipakai sementara** meski periodenya bukan 30 hari.
+
+| | Nilai |
+|---|---:|
+| KOL punya `followers_growth` | **25** · 0,32% |
+| Naik (di atas 0%) | 10 |
+| Datar (tepat 0%) | 8 |
+| Turun (di bawah 0%) | 7 |
+| Jarak antar snapshot | 10 hari (22 akun) · 13 hari (3 akun) |
+
+Dua syarat yang mengikat implementasi:
+
+1. **Dilarang dilabeli "Monthly" atau "30 hari".** Label resmi: **"Sejak Snapshot Terakhir"**.
+2. **Dilarang membuat rumus baru.** Angkanya dibawa apa adanya dari
+   `l1_silver.sp_build_unified_profile()` dan diverifikasi identik di L1, L2, dan API.
+
+Temuan R2/R3 (periode 10–13 hari, 0 akun punya 3 snapshot) **tetap berlaku dan tetap
+jadi penghambat sebenarnya**. Growth akan naik sendiri begitu scraping jalan lagi —
+1.951 dari 1.976 akun ber-kartu masih punya satu snapshot. Catatan: scraping berhenti
+sejak 2026-08-28, jadi selama itu angka 25 tidak akan bergerak.
+
+**Rising Creator tetap DERIVED — INCOMPLETE.** Ambang 5,5% masih tidak dipenuhi siapa pun
+(0 KOL), jadi filternya belum dibuat.
+
+## Ringkasan dampak revisi 2026-09-07
+
+| Bagian | Isi sebelumnya | Setelah implementasi |
+|---|---|---|
+| §5.5 · batas tier | dua ambang bertentangan | **satu ambang** — `kol_tiers` dibetulkan (033) |
+| §2 bucket tier | Mid-tier 1.809 · Macro 187 *(hitung manual)* | **sama, dan sekarang itu yang benar-benar dipakai** |
+| P-01 · 526 KOL di luar tier | menunggu keputusan produk | **CLOSED** — tanpa tier, tanpa `Unclassified` (034) |
+| §Ringkasan · Verified only | MISSING | **dihapus dari scope** — diganti Connected |
+| §3.5 Growth Classification | DERIVED — INCOMPLETE | **tetap 25 · 0,32%**, tapi **sudah dipakai** dengan label "Sejak Snapshot Terakhir" |
+| §3.5 Rising Creator | DERIVED — INCOMPLETE | **tidak berubah** — 0 KOL lolos ambang 5,5% |
+
+Semua angka di section ini dihitung ulang lewat query read-only ke database `kol`
+pada 2026-09-07, setelah migration 033 dan 034 diterapkan dan pipeline dijalankan ulang.

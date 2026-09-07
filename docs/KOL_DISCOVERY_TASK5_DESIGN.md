@@ -18,12 +18,26 @@ tipenya, diambil dari mana, dan cara menghitungnya.
 
 | | Jumlah | Isi |
 |---|---:|---|
-| **Sudah diputuskan** | 4 | Tier · Format konten · Connected · sumber jumlah follower **(P-02 — APPROVED/CLOSED)** |
-| **Menunggu keputusan produk** | 1 | Perlakuan 526 KOL di luar tier |
-| **Sengaja ditunda** | 2 | Jadwal update · batas Growth |
+| **Sudah diputuskan** | 6 | Tier · Format konten · Connected · sumber jumlah follower **(P-02)** · perlakuan 526 KOL di luar tier **(P-01)** · sumber & label Growth |
+| **Menunggu keputusan produk** | 0 | — |
+| **Sengaja ditunda** | 1 | Jadwal update |
 | **Datanya tidak ada** | 1 | Profiling Status — dikeluarkan dari rencana |
 
 **Empat filter siap dikerjakan:** Cari nama · Platform · Kategori · Tier.
+
+> **STATUS 2026-09-07 — sudah diimplementasikan dan diverifikasi.**
+>
+> Yang di dokumen ini masih berupa rancangan, sekarang sudah jalan:
+>
+> | Hal | Status | Bukti |
+> |---|---|---|
+> | Ambang Tier | sudah dibetulkan di database | migration 033 — 1.103 KOL pindah Macro ke Mid-Tier |
+> | **P-01** (526 KOL di luar tier) | **DIPUTUSKAN & selesai** | migration 034 — di bawah 1rb dan follower kosong **tidak dapat tier**, tanpa kelompok `Unclassified` |
+> | Connected | dipakai di Discovery | `platform_user_id` + `oauth_token`; hasil 0, dan itu benar |
+> | Verified | **dihapus dari Discovery** | badge platform tidak lagi jadi field terpisah |
+> | Growth | tampil, bisa di-sort, di-filter, ikut CSV | sumber `kol_profile_card.followers_growth`, 25 KOL |
+>
+> Bagian yang berubah ditandai **UPDATE 2026-09-07**.
 
 ---
 
@@ -51,7 +65,8 @@ Tidak perlu dijumlahkan atau dirata-rata dulu.
 | `er_is_outlier` | ya/tidak | **dihitung**: `er_pct > 10` | 83 baris | penanda nilai mustahil |
 | `platform_key` | teks | `platforms.key` | 7.496 · 97,1% | Platform |
 | `discovery_category[]` | daftar teks | `kol_categories.taxonomy_key` lewat `category_ids` | **4.155 · 53,82%** | **Kategori** |
-| `verified_status_raw` | teks | `kol_directory.verified_status` | 931 · 12,1% | Verified — **beda dari Connected** |
+| ~~`verified_status_raw`~~ | ~~teks~~ | ~~`kol_directory.verified_status`~~ | ~~931 · 12,1%~~ | **DIHAPUS 2026-09-07** — Verified tidak lagi jadi field Discovery |
+| `growth_pct` | angka (persen) | `l2_gold.kol_profile_card.followers_growth` lewat `kol_social_account` | 25 · 0,32% | **Growth — sejak snapshot terakhir, bukan 30 hari** |
 | `creator_city` | teks | `kol_directory.creator_city` | 0 · 0% | Kota kreator (belum bisa dipakai) |
 | `last_refreshed_at` | tanggal | `kol_directory.last_refreshed_at` | 7.496 · 97,1% — **artinya cacat** | Last Updated |
 | `created_at` | tanggal | `kol_directory.created_at` | 7.698 · 99,7% | Newly Added |
@@ -116,7 +131,7 @@ Tanpa keempatnya, angka yang lemah akan terlihat sama meyakinkannya dengan angka
 
 | Tidak masuk | Alasan |
 |---|---|
-| `growth_30d` | Ini perbandingan antara dua waktu, bukan satu angka tetap. Harus dihitung saat diminta, dan **wajib** ikut mengirim jarak hari sebenarnya — kalau tidak, angkanya tidak bisa diperiksa |
+| `growth_30d` | Ini perbandingan antara dua waktu, bukan satu angka tetap. Harus dihitung saat diminta, dan **wajib** ikut mengirim jarak hari sebenarnya — kalau tidak, angkanya tidak bisa diperiksa. **UPDATE 2026-09-07:** growth 30 hari memang masih tidak ada. Yang sekarang dikirim adalah `growth_pct` — selisih sejak snapshot sebelumnya (10–13 hari), sudah masuk struktur di atas dan **wajib berlabel "Sejak Snapshot Terakhir"** |
 | `campaign_count` | Jalur tabelnya beda sendiri, tidak lewat akun sosial. Nanti jadi query terpisah, bukan kolom tambahan |
 | Umur audiens · rate card · brand fit · reliability · topik konten · gaya konten | Barisnya nol atau kolomnya memang tidak ada di database |
 
@@ -167,8 +182,29 @@ tidak melenceng — dan itu **sudah pernah terjadi** pada filter Verified.
 Batas bawah ikut, batas atas tidak. Contoh: follower tepat 500.000 masuk **Macro**,
 follower 499.999 masuk **Mid-Tier**.
 
-Batasnya disimpan di file config, **jangan** ditulis langsung di kode dan **jangan**
-diambil dari tabel `kol_tiers` (batasnya sudah kedaluwarsa).
+**UPDATE 2026-09-07 — `kol_tiers` sudah dibetulkan, dan implementasinya memakai tabel itu.**
+
+Larangan lama ("jangan ambil dari `kol_tiers`, batasnya kedaluwarsa") **sudah tidak berlaku**.
+Migration 033 memperbaiki dua baris yang salah:
+
+| Tier | Batas lama (salah) | Batas sekarang |
+|---|---|---|
+| **Mid-tier** | 50.000 – **99.999** | 50.000 – **499.999** |
+| **Macro** | **100.000** – 999.999 | **500.000** – 999.999 |
+
+Nano, Micro, dan Mega tidak berubah. Diperbaiki lewat `UPDATE` (bukan hapus-lalu-isi)
+karena `agency_kol_accounts.tier_id` punya foreign key ke `kol_tiers.id`.
+
+**Catatan penyimpangan dari rancangan:** dokumen ini merancang ambang disimpan di file
+config. Yang benar-benar dikerjakan **membaca `public.kol_tiers`** — satu tabel dipakai
+bersama oleh query Discovery dan `l1_silver.sp_build_unified_profile()`, sehingga satu
+perbaikan langsung membetulkan UI dan L1/L2 sekaligus. Kalau ambang mau dipindah ke config,
+itu perubahan tersendiri dan harus ikut memindahkan L1 juga — jangan setengah-setengah,
+karena dua sumber ambang yang hidup bersamaan persis masalah yang bikin bug ini.
+
+Nama di database masih `Mid-tier` (huruf kecil t), sedangkan dokumen produk menulis
+`Mid-Tier`. **Sengaja belum diganti** — nilainya sudah tersimpan sebagai teks di
+`l1_silver.unified_profile.tier` dan `l2_gold.kol_profile_card.tier`, dan dipakai Saved List.
 
 **Sumber jumlah follower: `kol_directory.followers_count`.** — **P-02 · APPROVED/CLOSED.**
 Perhitungan Tier juga memakai kolom yang sama.
@@ -221,6 +257,15 @@ Kondisi sekarang: **0 akun · 0 KOL** (`oauth_token` 0 dari 7.496, `platform_use
 
 **Catatan penting:** Connected berbeda dari **Verified**. Verified punya kolom sendiri
 (`verified_status`: 454 verified · 477 unverified · 6.789 kosong) dan tidak boleh dicampur.
+
+**UPDATE 2026-09-07 — Verified dihapus dari Discovery.** Keputusan produk: badge verified
+platform **tidak dipertahankan** sebagai field terpisah. Discovery sekarang hanya punya
+Connected, dan 454 centang biru yang dulu tampil di kartu dan tabel sudah dilepas.
+Semantik lama dibersihkan tuntas — `verifiedOnly` jadi `connectedOnly`, `?verified=1` jadi
+`?connected=1`, label "Verified creators only" jadi "Connected creators only".
+
+Hasil Connected hari ini **0 dari 7.720**, dan itu benar: belum ada kreator yang
+menghubungkan akun. Chip-nya akan selalu kosong sampai connect flow berjalan — bukan bug.
 
 ---
 
@@ -301,15 +346,36 @@ akan hilang dari layar.
 
 ---
 
-## 6. Yang masih menunggu keputusan produk
+## 6. Keputusan produk — semuanya sudah tutup
 
-**Engineering tidak boleh memutuskan sendiri.**
+**Tidak ada lagi yang menunggu keputusan produk.**
 
-| Hal | Kondisi | Yang perlu diputuskan |
-|---|---|---|
-| **526 KOL di luar tier** | 304 KOL followernya di bawah 1.000, dan 222 KOL tidak punya data follower — total 6,8% dari 7.720 | Dibuatkan kelompok sendiri (`Unclassified`), atau dikeluarkan dari filter tier? Kalau dikeluarkan diam-diam, hasil filter tidak akan pernah berjumlah 7.720 dan tidak ada yang tahu kenapa |
+**P-01 — APPROVED / CLOSED (2026-09-07).** 526 KOL di luar tier (304 follower di bawah
+1.000 + 222 tanpa data follower).
 
-**P-02 — APPROVED / CLOSED.** Sumber jumlah follower untuk Tier: **`kol_directory.followers_count`**. `l2_gold.kol_profile_card` bukan sumber resmi untuk Followers maupun Tier. Tidak lagi menunggu keputusan produk.
+Keputusan: **follower di bawah 1rb dan follower kosong tidak mendapat tier** (`tier: null`),
+dan **tidak** dibuatkan kelompok `Unclassified` maupun `Unknown`.
+
+Yang dikerjakan: migration 034 membuang fallback di `sp_build_unified_profile()` yang
+selama ini menjatuhkan follower di bawah ambang terendah ke tier terbawah.
+
+| | Sebelum | Sesudah |
+|---|---:|---:|
+| L1 di bawah 1rb bertier `Nano` | 54 | **0** |
+| L2 di bawah 1rb bertier `Nano` | 54 | **0** |
+| L1 di bawah 1rb tier NULL | 0 | **54** |
+| Tier `Unclassified`/`Unknown` dibuat | — | **0** |
+
+Populasi 526 tetap 526 — tidak ada yang hilang, cuma tidak diberi label. Kekhawatiran di
+rancangan ("hasil filter tidak akan pernah berjumlah 7.720") tetap berlaku dan harus
+dijawab di sisi tampilan: hitung mereka sebagai kelompok tanpa tier, jangan dibuang diam-diam.
+
+Menariknya, perbaikan ini justru **mengembalikan** kesetaraan L1 dengan UI. Fallback tadi
+dulu dibuat (migration 009) supaya L1 sama dengan fungsi `TIER()` di UI lama. UI sekarang
+memakai `LEFT JOIN kol_tiers` tanpa fallback, jadi UI sudah lebih dulu benar dan justru
+L1/L2 yang tertinggal.
+
+**P-02 — APPROVED / CLOSED.** Sumber jumlah follower untuk Tier: **`kol_directory.followers_count`**. `l2_gold.kol_profile_card` bukan sumber resmi untuk Followers maupun Tier.
 
 ---
 
@@ -318,7 +384,7 @@ akan hilang dari layar.
 | Hal | Alasan |
 |---|---|
 | **Jadwal update per KOL** | Belum ada aturan seberapa sering tiap KOL diperbarui. Jawabannya menentukan apakah perlu menambah kolom baru di database atau cukup di config. **Jangan dipaksakan.** Empat filter (Data Status, Update Frequency, Next Update, Monitoring Priority) ikut ditunda |
-| **Batas Growth & Rising Creator** | Belum ada satu pun data pertumbuhan 30 hari yang nyata. Menentukan batasannya sekarang sama saja menebak |
+| ~~**Batas Growth & Rising Creator**~~ | **DIPUTUSKAN 2026-09-07 — tidak lagi ditunda.** Growth 30 hari memang masih tidak ada, tapi produk menerima **growth sejak snapshot terakhir** (10–13 hari) untuk sementara. Sumbernya `kol_profile_card.followers_growth`, **tanpa rumus baru**, dan **dilarang** dilabeli "Monthly" atau "30 hari". Filter memakai preset (Naik / Datar / Turun / di atas 0,5% / di atas 1%), bukan slider — karena 0% adalah nilai sah, bukan "tanpa batas". Rising Creator dengan ambang 5,5% **tetap ditunda**: nol KOL memenuhinya |
 
 ---
 

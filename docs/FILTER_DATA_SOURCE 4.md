@@ -6,6 +6,17 @@ Kalau ada beberapa kandidat, pilih satu dan tulis alasannya.
 **Dasar:** Task 2 (apa yang ada di database) dan Task 3 (seberapa lengkap isinya).
 **Terakhir diperbarui:** 2026-09-07 · **Jumlah KOL:** 7.720
 
+> **Status implementasi (2026-09-07).** Tiga keputusan di dokumen ini sudah
+> dijalankan dan terverifikasi, jadi dua baris "jangan pakai" di bawah **berubah**:
+>
+> | Hal | Sebelumnya di dokumen ini | Sekarang |
+> |---|---|---|
+> | `public.kol_tiers` | ditolak, batas kedaluwarsa | **dipakai** — batas diperbaiki migration 033 |
+> | `kol_profile_card.followers_growth` | jangan pakai | **dipakai** untuk filter Growth (bukan 30 hari) |
+> | Verified | dicatat sebagai sumber | **dihapus dari Discovery** — diganti Connected |
+>
+> Detailnya di masing-masing bagian, ditandai **UPDATE 2026-09-07**.
+
 ---
 
 ## Cara memilih
@@ -49,7 +60,16 @@ Sumbernya sudah tidak perlu diperdebatkan. Yang kurang cuma jumlah barisnya.
 | Minat audiens | `audience_interest_daily` | 23 · 0,30% |
 | Kualitas audiens | `feature.ig_audience_analysis` + `tt_audience_analysis` | 23 · 0,30% |
 | **Connected** | `social_account.oauth_token` + `social_account.platform_user_id` | 0 · 0% |
-| Verified | `kol_directory.verified_status` | 931 · 12,1% |
+| ~~Verified~~ | ~~`kol_directory.verified_status`~~ | ~~931 · 12,1%~~ |
+| **Growth** *(baru)* | `l2_gold.kol_profile_card.followers_growth` | 25 · 0,32% |
+
+**UPDATE 2026-09-07 — Verified dihapus dari Discovery.** Keputusan produk: badge verified
+platform tidak dipertahankan sebagai field terpisah. Discovery hanya punya **Connected**.
+454 badge yang dulu tampil di kartu dan tabel sudah dilepas.
+
+**UPDATE 2026-09-07 — Growth masuk daftar ini.** Sumbernya `kol_profile_card.followers_growth`,
+diambil lewat `kol_directory → kol_social_account → kol_profile_card`. Followers dan Tier
+**tetap** dari `kol_directory` — kartu L2 hanya dipakai untuk kolom growth-nya saja.
 
 ### Filter yang belum punya sumber
 
@@ -58,7 +78,7 @@ Sumbernya sudah tidak perlu diperdebatkan. Yang kurang cuma jumlah barisnya.
 | Profiling Status | Tidak ada nilai apa pun di database yang berarti "sedang diproses" | Keputusan produk + perubahan pipeline |
 | Kota kreator | `creator_city` kosong 100% | Diisi saat pendaftaran |
 | Umur audiens | Barisnya tidak pernah ditulis pipeline | Perluas analisis audiens |
-| Growth 30 hari | Belum ada akun yang punya 2 data berjarak 30 hari | Menunggu waktu |
+| Growth 30 hari | Belum ada akun yang punya 2 data berjarak 30 hari | Menunggu waktu — **tetap belum ada**. Yang dikirim sekarang adalah growth *sejak snapshot terakhir* (10–13 hari), bukan 30 hari |
 | Data Status · Update Frequency · Next Update · Monitoring Priority | `refresh_tier` kosong, `scheduler_config` kosong | Keputusan jadwal update |
 | Rate card · Data campaign | 19 tabel, hampir semuanya kosong | Adopsi produk |
 | Reliability · Topik konten · Gaya konten | Kolomnya tidak ada di database | Fitur baru |
@@ -94,11 +114,28 @@ Ada tiga kandidat:
 |---|---|---|
 | **`kol_directory.followers_count`, dihitung saat query** ✅ | 97,1% | **Dipakai** |
 | `l2_gold.kol_profile_card.tier` | 25,6% | Ditolak — cuma mencakup seperempat KOL, dan batasnya kedaluwarsa |
-| Tabel `public.kol_tiers` | — | Ditolak — batasnya kedaluwarsa (Macro 100rb–1jt) |
+| **Tabel `public.kol_tiers`** ✅ | — | **Dipakai** — batasnya sudah diperbaiki, lihat di bawah |
 
 Batas yang berlaku ditetapkan tim produk, dan **jumlah follower diambil dari
 `kol_directory.followers_count`** — ini sudah disetujui. `kol_profile_card` bukan sumber
 resmi untuk Followers maupun Tier.
+
+**UPDATE 2026-09-07 — `kol_tiers` tidak lagi ditolak.** Alasan penolakannya (batas
+kedaluwarsa) sudah hilang: migration 033 memperbaiki dua baris yang salah.
+
+| Tier | Batas lama (salah) | Batas sekarang |
+|---|---|---|
+| Nano | 1.000 – 9.999 | sama |
+| Micro | 10.000 – 49.999 | sama |
+| **Mid-tier** | 50.000 – **99.999** | 50.000 – **499.999** |
+| **Macro** | **100.000** – 999.999 | **500.000** – 999.999 |
+| Mega | 1.000.000+ | sama |
+
+Diperbaiki lewat `UPDATE`, bukan hapus-lalu-isi, karena `agency_kol_accounts.tier_id`
+punya foreign key ke `kol_tiers.id`. Dampaknya **1.103 KOL pindah dari Macro ke Mid-Tier**.
+Jumlah follower tetap dibaca dari `kol_directory.followers_count`; `kol_tiers` hanya
+menyediakan ambangnya. Nama `Mid-tier` di database sengaja belum diganti jadi `Mid-Tier`
+— itu perubahan tersendiri karena nilainya sudah tersimpan sebagai teks di L1/L2.
 
 ### Connected: OAuth token + platform user ID, bukan kolom `connected`
 
@@ -113,12 +150,33 @@ Justru itu alasan perlu ditulis sekarang: begitu ada yang mulai terisi, ketigany
 
 ---
 
-## Dua sumber yang jangan dipakai
+## Sumber yang jangan dipakai
 
 | Jangan | Alasan |
 |---|---|
-| `kol_profile_card.followers_growth` | **Bukan** pertumbuhan 30 hari. Isinya selisih antara dua data terakhir, jaraknya bisa berapa saja — sekarang nyatanya 10 hari (22 akun) dan 13 hari (3 akun) |
 | `kol_directory.last_refreshed_at` sebagai penanda kapan data di-scrape | Terisi 97,1%, tapi **73,6% nilainya warisan impor Excel**, bukan jejak scraping. Kolomnya boleh dipakai, artinya yang tidak boleh dipercaya |
+
+### UPDATE 2026-09-07 — `followers_growth` dikeluarkan dari daftar ini
+
+Dulu dilarang dengan alasan *"bukan pertumbuhan 30 hari"*. Alasan itu **masih benar**:
+jaraknya 10 hari (22 akun) dan 13 hari (3 akun), bukan 30.
+
+Yang berubah adalah keputusan produk: angka itu **boleh dipakai sementara**, karena ia
+satu-satunya sumber growth yang benar-benar terukur, dengan dua syarat:
+
+1. **Tidak boleh dilabeli "Monthly" atau "30 hari".** Label yang dipakai:
+   **"Sejak Snapshot Terakhir"**.
+2. **Tidak boleh dibuatkan rumus baru.** Angkanya dibawa apa adanya dari
+   `l1_silver.sp_build_unified_profile()`:
+   `round((followers - followers_sebelumnya) / followers_sebelumnya * 100, 4)`.
+
+Cakupannya kecil dan itu bukan bug: **25 dari 7.720** (0,32%). Growth butuh dua snapshot
+profil, sedangkan 1.951 dari 1.976 akun ber-kartu baru di-scrape satu kali. Angka ini naik
+sendiri begitu scraping jalan lagi.
+
+`l2_gold.kol_metric_daily.followers_growth` **tetap tidak boleh dipakai** — kolomnya ada
+tapi tidak pernah terisi (0 dari 280), dan memang tidak bisa: grain-nya tanggal tayang post,
+sedangkan growth melekat pada pasangan snapshot profil.
 
 ---
 

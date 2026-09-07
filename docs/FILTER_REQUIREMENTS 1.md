@@ -5,6 +5,19 @@
 **Yang belum dikerjakan di sini:** mengecek datanya ada atau tidak — itu Task 2.
 **Terakhir diperbarui:** 2026-09-07
 
+> **STATUS 2026-09-07.** Daftar kebutuhan di dokumen ini tidak berubah. Yang berubah
+> hanya dua hal setelah implementasi:
+>
+> * **Verified dihapus dari Discovery.** Badge verified platform tidak dipertahankan
+>   sebagai filter/field terpisah — Discovery cuma punya **Connected**.
+> * **Growth sudah tersedia**, tapi bukan "Growth 30 hari". Yang terkirim adalah
+>   perubahan follower **sejak snapshot terakhir** (10–13 hari), berlabel
+>   **"Sejak Snapshot Terakhir"**.
+>
+> Filter yang sudah benar-benar jalan di Discovery: Cari nama · Platform · Kategori ·
+> Tier · Minimum follower · Minimum engagement rate · Maksimum rate card · Connected ·
+> **Growth**. Sisanya masih menunggu data — lihat Task 3 dan Task 4.
+
 ---
 
 ## Kesimpulan singkat
@@ -41,7 +54,8 @@ Dikelompokkan seperti tampilan di layar.
 | Minimum follower | Penggeser | 0 sampai 10 juta |
 | Minimum engagement rate | Penggeser | 0% sampai 10% |
 | Maksimum rate card | Penggeser | Rp 500rb sampai Rp 1jt |
-| Connected | Tombol nyala/mati | Kreator yang sudah menghubungkan akunnya |
+| Connected | Tombol nyala/mati | Kreator yang sudah menghubungkan akunnya — `platform_user_id` **dan** `oauth_token` terisi. Hasil hari ini 0, dan itu benar |
+| Growth | Pilihan preset | Naik · Datar (0%) · Turun · di atas 0,5% · di atas 1% — **sejak snapshot terakhir**, bukan 30 hari |
 
 ### Audiens
 

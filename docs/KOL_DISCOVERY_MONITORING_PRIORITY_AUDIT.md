@@ -674,7 +674,9 @@ menjalankan priority, bukan definisi priority-nya.
 | Index | Tidak ada; satu-satunya index adalah `kol_directory_pkey` |
 
 **Jangan tertukar dengan `public.kol_tiers`** (5 baris: Nano 1.000–9.999 · Micro
-10.000–49.999 · Mid-tier 50.000–99.999 · Macro 100.000–999.999 · Mega ≥1.000.000).
+10.000–49.999 · **Mid-tier 50.000–499.999** · **Macro 500.000–999.999** · Mega
+≥1.000.000 — *dua ambang tengah dibetulkan migration 033 pada 2026-09-07; angka lama
+yang salah: Mid-tier 50.000–99.999 dan Macro 100.000–999.999*).
 Itu **tier ukuran creator** berdasarkan followers, dirujuk
 `agency_kol_accounts.tier_id` (7.207 terisi) — konsep yang sama sekali berbeda dari
 `refresh_tier`.

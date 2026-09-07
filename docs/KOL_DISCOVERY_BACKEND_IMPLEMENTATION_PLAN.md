@@ -7,6 +7,23 @@
 > Ini rencana, bukan hasil kerja. Tidak ada kode, tabel, atau kolom yang dibuat di sini.
 > Angka di bawah adalah kondisi database 2026-09-07 dan dipakai sebagai patokan saat testing.
 
+> ## ⚠️ STATUS 2026-09-07 — sebagian rencana ini SUDAH DIKERJAKAN
+>
+> Baca ini dulu sebelum mengerjakan apa pun di bawah. **Empat instruksi di dokumen
+> ini sekarang KEBALIKAN dari yang benar**, dan sudah dikoreksi di tempatnya
+> masing-masing (ditandai **UPDATE 2026-09-07**):
+>
+> | Instruksi lama | Sekarang |
+> |---|---|
+> | "Jangan pakai tabel `kol_tiers`" | **Pakai** — batasnya sudah dibetulkan (migration 033) |
+> | "Jangan pakai `kol_profile_card.followers_growth`" | **Pakai** untuk Growth (bukan 30 hari) |
+> | Tahap 2: "526 KOL dikasih label `Unclassified`" | **JANGAN.** Produk memutuskan: tanpa tier, tanpa `Unclassified` |
+> | "526 KOL menunggu keputusan produk" | **P-01 CLOSED** (migration 034) |
+>
+> Yang sudah selesai: Tier (ambang + P-01), Connected, Growth (kolom, sort, filter,
+> CSV export), dan Growth di KOL Detail. Yang masih berlaku sebagai rencana: perluasan
+> `search_kol_directory()`, `discovery.kol_filter_base`, "tiga jawaban", dan filter sisanya.
+
 ---
 
 ## 1. Bentuk API
@@ -60,11 +77,13 @@ GET /api/discovery/kol
 | Jangan | Alasan |
 |---|---|
 | `kol_directory.category_id` | Cuma menyimpan satu kategori — 1.183 KOL kehilangan kategori lainnya |
-| Tabel `kol_tiers` atau kolom `tier` | Batasnya sudah kedaluwarsa |
-| `kol_profile_card.tier` dan `kol_profile_card.followers_count` | **Bukan sumber resmi** untuk Followers maupun Tier (keputusan sudah disetujui). Batasnya juga kedaluwarsa, dan cuma mencakup 1.976 KOL |
+| ~~Tabel `kol_tiers`~~ | ~~Batasnya sudah kedaluwarsa~~ **UPDATE 2026-09-07: JUSTRU DIPAKAI.** Migration 033 membetulkan Mid-tier jadi 50rb–499.999 dan Macro jadi 500rb–999.999. Satu tabel ini dipakai bersama query Discovery dan `sp_build_unified_profile()`, jadi ambangnya tidak bisa lagi berbeda antara UI dan L1/L2 |
+| Kolom `tier` di `kol_profile_card` | **Bukan sumber resmi** untuk Tier — cuma mencakup 1.976 KOL. Tetap berlaku |
+| `kol_profile_card.followers_count` | **Bukan sumber resmi** untuk Followers. Sumbernya `kol_directory.followers_count`. Tetap berlaku |
 | `social_account.connected` | Kolomnya ada, tapi **bukan** patokan resmi Connected |
 | `kol_directory.platform_user_id` | Hasil scraping, **bukan bukti** kreator menghubungkan akun |
-| `kol_profile_card.followers_growth` | Bukan pertumbuhan 30 hari |
+| ~~`kol_profile_card.followers_growth`~~ | ~~Bukan pertumbuhan 30 hari~~ **UPDATE 2026-09-07: DIPAKAI.** Masih benar bahwa ini bukan pertumbuhan 30 hari (jendelanya 10–13 hari), tapi produk menerimanya sementara. Dua syarat: **jangan** dilabeli "Monthly"/"30 hari" (label resmi: **"Sejak Snapshot Terakhir"**), dan **jangan** bikin rumus baru. Jalurnya `kol_directory → kol_social_account → kol_profile_card`, dan hanya kolom growth-nya yang diambil — Followers dan Tier tetap dari `kol_directory` |
+| `l2_gold.kol_metric_daily.followers_growth` | **Tetap jangan.** Kolomnya ada tapi 0 dari 280 terisi, dan memang tidak bisa diisi: grainnya tanggal tayang post, bukan pasangan snapshot profil |
 
 ---
 
@@ -110,7 +129,16 @@ END
 Batas bawah ikut, batas atas tidak: follower 500.000 → Macro, 499.999 → Mid-Tier.
 Angka batasnya taruh di config, jangan ditulis langsung di kode.
 
-⚠️ Dua baris `NULL` di atas masih **menunggu keputusan produk** — jangan dikunci dulu.
+**UPDATE 2026-09-07 — dua baris `NULL` itu sudah final, boleh dikunci.**
+
+**P-01 CLOSED.** Follower di bawah 1.000 dan follower kosong **tidak mendapat tier**
+(`tier: null`). **Tidak** dibuatkan kelompok `Unclassified` maupun `Unknown`.
+Sudah dijalankan lewat migration 034; L1 dan L2 ikut dibetulkan (54 KOL yang tadinya
+`Nano` sekarang `null`).
+
+Yang tetap jadi tanggung jawab tampilan: 526 KOL itu **harus tetap dihitung** sebagai
+kelompok tanpa tier (`total_unknown`), jangan dibuang diam-diam dari hasil filter —
+kalau tidak, jumlah hasil tidak akan pernah 7.720 dan tidak ada yang tahu kenapa.
 
 ### Format konten
 
@@ -170,7 +198,7 @@ Tiga hal yang wajib dijaga:
 | Tahap | Isi | Butuh apa dulu |
 |---|---|---|
 | **1** | Perluas `db.search_kol_directory()` jadi query yang bisa menerima banyak parameter: kata kunci, platform, minimum follower, kategori, halaman. Plus bentuk jawaban di bagian 1 | — |
-| **2** | Tier — bikin `CASE` dengan batas dari config. 526 KOL di luar tier dikasih label sementara `Unclassified` + catatan TODO | Tahap 1 |
+| **2** | ~~Tier — bikin `CASE` dengan batas dari config. 526 KOL dikasih label sementara `Unclassified` + catatan TODO~~ **SELESAI 2026-09-07.** Ambang dibetulkan di `public.kol_tiers` (033) dan dibaca lewat `LEFT JOIN`; 526 KOL **tanpa tier**, **tanpa** `Unclassified` (034) | Tahap 1 |
 | **3** | Buat `discovery.kol_filter_base` — satu query tersimpan yang merapikan jalur tabel penghubung jadi satu baris per KOL | Tahap 1 |
 | **4** | Format konten dan Connected, keduanya diambil dari tahap 3 | Tahap 3 |
 | **5** | Terapkan "tiga jawaban" ke semua filter + tampilkan `total_unknown` | Tahap 1–4 |
@@ -200,7 +228,22 @@ Angka di bawah kondisi database 2026-09-07.
 - [ ] Kelima tier + 304 + 222 = **7.720** (tidak ada KOL yang hilang)
 - [ ] Macro **bukan** 1.290 dan **bukan** 1.123
 - [ ] Follower 500.000 → Macro · 499.999 → Mid-Tier · 1.000.000 → Mega
-- [ ] Tidak ada query yang menyentuh tabel `kol_tiers`
+- [ ] ~~Tidak ada query yang menyentuh tabel `kol_tiers`~~ → **dibalik:** query Discovery **memang** `LEFT JOIN public.kol_tiers`, dan ambangnya harus persis Nano 1.000–9.999 · Micro 10.000–49.999 · Mid-tier 50.000–499.999 · Macro 500.000–999.999 · Mega ≥1.000.000
+- [ ] Follower 999 → tanpa tier · follower kosong → tanpa tier · **tidak ada** tier bernama `Unclassified`/`Unknown`
+
+**Growth** *(baru — UPDATE 2026-09-07)*
+
+- [ ] Tanpa filter → 7.720 baris, kolom Growth terisi **25**, sisanya `—`
+- [ ] Naik 10 · Datar (tepat 0%) 8 · Turun 7
+- [ ] Preset "Datar (0%)" mengirim `growthMin=0` **dan** `growthMax=0`, dan dihitung sebagai filter aktif — 0% bukan berarti "tanpa batas"
+- [ ] Nilai di list = nilai di KOL Detail = `kol_profile_card.followers_growth`
+- [ ] CSV export memuat kolom Growth sebagai **angka mentah**, bukan string berformat; NULL → kosong
+- [ ] Tidak ada label "Monthly" atau "30 hari" di mana pun
+
+**Connected** *(UPDATE 2026-09-07)*
+
+- [ ] Connected = `social_account.platform_user_id IS NOT NULL AND oauth_token IS NOT NULL` → **0 KOL**, dan itu benar
+- [ ] Tidak ada sisa `verifiedOnly` / `?verified=1` / label "Verified" yang dipakai sebagai Connected
 
 **Format konten**
 
@@ -235,9 +278,11 @@ Angka di bawah kondisi database 2026-09-07.
 
 ### Menunggu keputusan produk
 
-| Hal | Kondisi | Pilihan |
+**Kosong — tidak ada lagi yang menunggu keputusan produk untuk filter di dokumen ini.**
+
+| Hal | Kondisi | Putusan |
 |---|---|---|
-| 526 KOL di luar tier | 304 follower di bawah 1.000 + 222 tanpa data = 6,8% | Dibuatkan kelompok `Unclassified`, atau dikeluarkan dari tier? |
+| ~~526 KOL di luar tier~~ | 304 follower di bawah 1.000 + 222 tanpa data = 6,8% | **P-01 CLOSED 2026-09-07** — tanpa tier, **tanpa** `Unclassified`. Tetap dihitung di `total_unknown` |
 
 ### Sudah diputuskan
 

@@ -275,6 +275,15 @@ tabel `platforms`.
 
 ## 3.3 Dua MISMATCH
 
+> **✅ RESOLVED 2026-09-07 — kedua mismatch di bawah sudah ditutup.**
+> Isi section ini dibiarkan apa adanya sebagai catatan temuan; yang berlaku sekarang
+> adalah dua putusan berikut.
+>
+> | Mismatch | Putusan |
+> |---|---|
+> | **KOL Tier** | Ambang `public.kol_tiers` **dibetulkan** (migration 033): Mid-tier jadi 50.000–499.999, Macro jadi 500.000–999.999. Tidak ada lagi dua versi ambang. Macro sekarang **187**, Mid-Tier **1.809** |
+> | **Verified only** | Definisi app **dibuang**. Discovery memakai Connected = `social_account.platform_user_id IS NOT NULL AND oauth_token IS NOT NULL` → **0 KOL**, dan itu benar. Badge `verified_status` (454) tidak lagi jadi field Discovery |
+
 **KOL Tier** — batas UI berbeda dari tabel `kol_tiers`:
 
 | Tier | Batas prototype | Batas `kol_tiers` |
@@ -293,6 +302,11 @@ batas DB — selisih 6,8×. App nyata memakai batas DB.
 | App (`kolDirectory.ts:157`) | `LOWER(verified_status) IN ('verified','true','yes')` | **454 KOL** |
 
 Keduanya tidak bisa benar bersamaan. Perlu keputusan definisi.
+
+**Keputusan (2026-09-07):** yang dipakai definisi pipeline, diperketat jadi
+`platform_user_id` **dan** `oauth_token` harus sama-sama terisi di baris
+`social_account` yang sama. Definisi app (`verified_status`) dihapus dari Discovery
+— beserta 454 badge yang dulu tampil di kartu dan tabel.
 
 ## 3.4 Enam BLOCKED
 
