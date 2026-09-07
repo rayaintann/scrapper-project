@@ -1,0 +1,653 @@
+diff --git a/src/app/api/organizations/[id]/discover/kol-directory/route.ts b/src/app/api/organizations/[id]/discover/kol-directory/route.ts
+index 5b5897b..0cff3bb 100644
+--- a/src/app/api/organizations/[id]/discover/kol-directory/route.ts
++++ b/src/app/api/organizations/[id]/discover/kol-directory/route.ts
+@@ -6,7 +6,7 @@ type Params = { params: Promise<{ id: string }> }
+ 
+ /**
+  * GET /api/organizations/[id]/discover/kol-directory
+- *   ?q=&platform=&category=&tier=a,b&follMin=&minEr=&maxRate=&verified=1&sort=&page=&pageSize=&facets=1
++ *   ?q=&platform=&category=&tier=a,b&follMin=&minEr=&maxRate=&growthMin=&growthMax=&connected=1&sort=&page=&pageSize=&facets=1
+  *
+  * The roster itself is global — it is the commercial KOL platform's directory,
+  * not org-scoped data — but the endpoint still requires org membership so the
+@@ -48,7 +48,12 @@ export async function GET(req: NextRequest, { params }: Params) {
+       minFollowers: num('follMin'),
+       minErPct: num('minEr'),
+       maxRate: num('maxRate'),
+-      verifiedOnly: sp.get('verified') === '1',
++      // Growth bounds may legitimately be negative or exactly 0, so they go
++      // through `num` (which keeps an absent param absent) rather than a
++      // truthiness check.
++      minGrowth: num('growthMin'),
++      maxGrowth: num('growthMax'),
++      connectedOnly: sp.get('connected') === '1',
+       sort: sp.get('sort'),
+       dir: sp.get('dir'),
+       page: num('page') ?? 1,
+diff --git a/src/components/discover/DiscoverCompare.tsx b/src/components/discover/DiscoverCompare.tsx
+index 3260174..87911e4 100644
+--- a/src/components/discover/DiscoverCompare.tsx
++++ b/src/components/discover/DiscoverCompare.tsx
+@@ -64,7 +64,7 @@ interface Contender {
+   /* published by the KOL platform */
+   followers: number | null
+   rosterErPct: number | null
+-  verified: boolean | null
++  connected: boolean | null
+   category: string | null
+   city: string | null
+ }
+@@ -83,7 +83,7 @@ const fromAccount = (a: DirectoryAccount): Contender => ({
+   measuredErPct: a.avgErPct,
+   followers: null,
+   rosterErPct: null,
+-  verified: null,
++  connected: null,
+   category: null,
+   city: null,
+ })
+@@ -102,7 +102,7 @@ const fromRoster = (r: KolDirectoryRow): Contender => ({
+   measuredErPct: null,
+   followers: r.followers,
+   rosterErPct: r.erPct,
+-  verified: r.verified,
++  connected: r.connected,
+   category: r.categories[0] ?? null,
+   city: r.city,
+ })
+@@ -194,7 +194,7 @@ const FACTS: { label: string; get: (c: Contender) => string | null }[] = [
+   { label: 'Tier / relasi', get: c => c.badge },
+   { label: 'Kategori', get: c => c.category },
+   { label: 'Kota', get: c => c.city },
+-  { label: 'Verified', get: c => (c.verified === null ? null : c.verified ? 'Ya' : 'Tidak') },
++  { label: 'Connected', get: c => (c.connected === null ? null : c.connected ? 'Ya' : 'Tidak') },
+ ]
+ 
+ export default function DiscoverCompare({
+diff --git a/src/components/discover/KolCreatorReport.tsx b/src/components/discover/KolCreatorReport.tsx
+index 3518905..3fc5cb3 100644
+--- a/src/components/discover/KolCreatorReport.tsx
++++ b/src/components/discover/KolCreatorReport.tsx
+@@ -66,7 +66,7 @@ export default function KolCreatorReport({
+     categories: creator.categories.join(' · ') || '—',
+     followers: creator.followers ?? 0,
+     erPct: creator.erPct === null ? '' : creator.erPct.toFixed(2),
+-    verified: creator.verified ? 'Ya' : 'Tidak',
++    connected: creator.connected ? 'Ya' : 'Tidak',
+     status: creator.status,
+     followersRank: `#${rank.followersRank} dari ${rank.rosterTotal}`,
+     categoryRank: rank.categoryFollowersRank === null
+@@ -97,7 +97,7 @@ export default function KolCreatorReport({
+     { key: 'categories', header: 'Kategori', value: r => r.categories },
+     { key: 'followers', header: 'Followers', value: r => r.followers },
+     { key: 'erPct', header: 'Engagement rate %', value: r => r.erPct },
+-    { key: 'verified', header: 'Verified', value: r => r.verified },
++    { key: 'connected', header: 'Connected', value: r => r.connected },
+     { key: 'status', header: 'Data status', value: r => r.status },
+     { key: 'followersRank', header: 'Peringkat followers', value: r => r.followersRank },
+     { key: 'categoryRank', header: 'Peringkat kategori', value: r => r.categoryRank },
+diff --git a/src/components/discover/KolCreatorSections.tsx b/src/components/discover/KolCreatorSections.tsx
+index b902040..600a472 100644
+--- a/src/components/discover/KolCreatorSections.tsx
++++ b/src/components/discover/KolCreatorSections.tsx
+@@ -166,6 +166,25 @@ export function PerformanceSection({ creator, platforms, intel, gold }: SectionP
+     }
+   }, [gold])
+ 
++  /**
++   * The L2 card for this creator's own platform, falling back to the largest.
++   * `kolGold` returns one card per linked account ordered by followers, and the
++   * roster row this page was opened from names exactly one platform.
++   */
++  const goldCard = useMemo(() => {
++    const cards = gold?.cards ?? []
++    if (!cards.length) return null
++    return cards.find(c => c.platform === creator.platform) ?? cards[0]
++  }, [gold, creator.platform])
++
++  /**
++   * Real follower growth, straight from `l2_gold.kol_profile_card`. It is the
++   * change since the account's PREVIOUS snapshot — 10-13 days apart today, not
++   * a month — so it is never labelled "monthly". Null for the ~99% of the
++   * roster scraped only once; those keep the modelled figure with its marker.
++   */
++  const realGrowth = goldCard?.followersGrowth ?? null
++
+   const hasGold = goldPoints.length > 0 || (gold?.daily.length ?? 0) > 0
+ 
+   /**
+@@ -328,14 +347,27 @@ export function PerformanceSection({ creator, platforms, intel, gold }: SectionP
+ 
+       <Split
+         main={
+-          <VizCard title="Growth" subtitle="Follower growth — 6 bulan" sample>
++          <VizCard title="Growth" subtitle="Follower growth" sample>
++            {/* The six-month curve is still modelled — the warehouse holds at
++                most two profile snapshots per account, so there is no history
++                to draw. Only the tile below it is real. */}
+             <TrendChart points={intel.trend.map(p => ({ x: p.month, y: p.followers }))}
+               format={fmtNum} label="Followers" />
+             <div className="grid gap-2.5 mt-3" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(130px,1fr))' }}>
+               <StatTile label="Current followers"
+                 value={creator.followers === null ? '—' : fmtNum(creator.followers)}
+                 hint="data asli roster" />
+-              <StatTile label="Monthly" value={`${intel.growth.monthly}%`} sample />
++              {/* Real when the pipeline has two snapshots for this account.
++                  Deliberately NOT called "Monthly": the window is whatever the
++                  scraper produced between the two snapshots. */}
++              <StatTile label="Sejak snapshot terakhir"
++                value={realGrowth === null ? '—' : `${realGrowth > 0 ? '+' : ''}${realGrowth.toFixed(2)}%`}
++                sample={realGrowth === null}
++                hint={realGrowth === null
++                  ? 'butuh dua snapshot; creator ini baru punya satu'
++                  : goldCard?.snapshotDate
++                    ? `data asli L2 Gold · snapshot ${goldCard.snapshotDate}`
++                    : 'data asli L2 Gold'} />
+               <StatTile label="3 bulan" value={`${intel.growth.threeMonth}%`} sample />
+               <StatTile label="6 bulan" value={`${intel.growth.sixMonth}%`} sample />
+             </div>
+diff --git a/src/components/discover/KolCreatorWorkspace.tsx b/src/components/discover/KolCreatorWorkspace.tsx
+index 3cf54e8..a5faab7 100644
+--- a/src/components/discover/KolCreatorWorkspace.tsx
++++ b/src/components/discover/KolCreatorWorkspace.tsx
+@@ -284,10 +284,10 @@ function Loaded({
+                 <h1 style={{ ...PJ, color: T.t1 }} className="text-[20px] font-extrabold tracking-[-0.02em]">
+                   {name}
+                 </h1>
+-                {creator.verified && (
++                {creator.connected && (
+                   <span style={{ ...PJ, background: '#eaf5ef', color: '#3d8a5f' }}
+                     className="inline-flex items-center gap-1 text-[9.5px] font-extrabold px-2 py-0.5 rounded-full">
+-                    <span className="material-symbols-outlined text-[12px]">verified</span>Verified
++                    <span className="material-symbols-outlined text-[12px]">link</span>Connected
+                   </span>
+                 )}
+                 {creator.tier && (
+diff --git a/src/components/discover/KolDirectoryFilters.tsx b/src/components/discover/KolDirectoryFilters.tsx
+index f213d17..8209b8f 100644
+--- a/src/components/discover/KolDirectoryFilters.tsx
++++ b/src/components/discover/KolDirectoryFilters.tsx
+@@ -11,7 +11,7 @@
+  * audience demographics, authenticity, brand fit, paid ratio, campaigns run,
+  * rate card, format. Those are left out rather than shipped as controls that
+  * filter nothing; what remains is exactly what `public.kol_directory` can
+- * answer: platform, tier, followers, engagement, category, verified.
++ * answer: platform, tier, followers, engagement, category, connected.
+  */
+ 
+ import { PJ, TOKENS as T, fmtNum } from './ui'
+@@ -32,12 +32,41 @@ export interface KolFilters {
+    * price under a number cannot be satisfied by the absence of a price.
+    */
+   maxRate: number
+-  verifiedOnly: boolean
++  /**
++   * Business Connected: the creator linked the account through OAuth
++   * (`social_account.platform_user_id` AND `oauth_token`). NOT the
++   * platform's blue tick — that badge was dropped from Discovery.
++   */
++  connectedOnly: boolean
++  /**
++   * Follower-growth band, as a preset key rather than a slider.
++   *
++   * A slider cannot express this filter: every other numeric filter here uses
++   * 0 to mean "no bound", but 0% growth is a real, common value — eight of the
++   * twenty-five measured creators sit exactly at 0.0000%. Presets keep "no
++   * bound" and "exactly flat" distinguishable without a nullable slider.
++   */
++  growth: GrowthKey
+ }
+ 
++/**
++ * Growth bands. Bounds are percentage points of change since the account's
++ * PREVIOUS snapshot — not a month. `min`/`max` are inclusive and `null` means
++ * unbounded on that side.
++ */
++export const GROWTH_PRESETS = [
++  { key: '',     label: 'Any',            min: null, max: null },
++  { key: 'up',   label: 'Naik (> 0%)',    min: 0.0001, max: null },
++  { key: 'flat', label: 'Datar (0%)',     min: 0, max: 0 },
++  { key: 'down', label: 'Turun (< 0%)',   min: null, max: -0.0001 },
++  { key: 'up05', label: 'Naik >= 0,5%',   min: 0.5, max: null },
++  { key: 'up1',  label: 'Naik >= 1%',     min: 1, max: null },
++] as const
++export type GrowthKey = (typeof GROWTH_PRESETS)[number]['key']
++
+ export const KOL_FILTERS_DEFAULT: KolFilters = {
+   category: '', platform: '', tier: '', follMin: 0, erMin: 0, maxRate: 0,
+-  verifiedOnly: false,
++  connectedOnly: false, growth: '',
+ }
+ 
+ /**
+@@ -76,7 +105,7 @@ export const FOLLOWER_STEPS = [
+ export function activeFilterCount(f: KolFilters): number {
+   return [
+     f.platform !== '', f.tier !== '', f.follMin > 0, f.erMin > 0, f.maxRate > 0,
+-    f.verifiedOnly,
++    f.connectedOnly, f.growth !== '',
+   ].filter(Boolean).length
+ }
+ 
+@@ -88,7 +117,12 @@ export const filtersToParams = (f: KolFilters): Record<string, string> => {
+   if (f.follMin > 0) p.follMin = String(f.follMin)
+   if (f.erMin > 0) p.minEr = String(f.erMin)
+   if (f.maxRate > 0) p.maxRate = String(f.maxRate)
+-  if (f.verifiedOnly) p.verified = '1'
++  if (f.connectedOnly) p.connected = '1'
++  if (f.growth) {
++    const g = GROWTH_PRESETS.find(x => x.key === f.growth)
++    if (g?.min != null) p.growthMin = String(g.min)
++    if (g?.max != null) p.growthMax = String(g.max)
++  }
+   return p
+ }
+ 
+@@ -241,7 +275,8 @@ export function KolFilterPanel({
+   const count = activeFilterCount(filters)
+   const follIdx = Math.max(0, FOLLOWER_STEPS.indexOf(filters.follMin))
+   const rateIdx = Math.max(0, RATE_STEPS.indexOf(filters.maxRate))
+-  const reachActive = [filters.follMin > 0, filters.erMin > 0, filters.maxRate > 0]
++  const reachActive = [filters.follMin > 0, filters.erMin > 0, filters.maxRate > 0,
++    filters.growth !== '']
+     .filter(Boolean).length
+ 
+   return (
+@@ -349,11 +384,26 @@ export function KolFilterPanel({
+           <Range label="Max. rate card" min={0} max={RATE_STEPS.length - 1} step={1} value={rateIdx}
+             display={filters.maxRate ? `≤ ${idrShortFilter(filters.maxRate)}` : 'Any'}
+             onChange={i => onChange({ maxRate: RATE_STEPS[i] })} />
++          <div className="my-[7px] mb-2.5">
++            <div className="flex justify-between text-[10.5px] mb-[3px]" style={{ color: T.t3 }}>
++              <span>Growth</span>
++            </div>
++            <select value={filters.growth}
++              onChange={e => onChange({ growth: e.target.value as GrowthKey })}
++              className="w-full text-[10.5px] rounded-md px-2 py-1.5 border"
++              style={{ borderColor: '#d8dde1', color: T.t1, background: '#fff' }}>
++              {GROWTH_PRESETS.map(g => (
++                <option key={g.key || 'any'} value={g.key}>{g.label}</option>
++              ))}
++            </select>
++          </div>
+           <p className="text-[9.5px] leading-[1.4] mt-1" style={{ color: T.t4 }}>
+             Engagement rate hanya terukur pada sebagian roster — memasang minimum
+             akan menyembunyikan creator yang belum pernah diukur. Rate card ada
+             untuk 7.230 dari 7.718 creator; memasang plafon harga menyembunyikan
+-            sisanya.
++            sisanya. Growth dihitung dari perubahan followers sejak snapshot
++            sebelumnya (bukan 30 hari) dan baru terukur untuk 25 creator yang
++            sudah punya dua snapshot — memasang filter menyembunyikan sisanya.
+           </p>
+         </Section>
+ 
+@@ -422,18 +472,19 @@ export function KolFilterPanel({
+         <div className="pt-2.5 px-0.5 pb-0.5">
+           <div className="flex items-center gap-3">
+             <div className="flex-1">
+-              <div style={{ ...PJ, color: T.t1 }} className="text-[12px] font-bold">Verified creators only</div>
++              <div style={{ ...PJ, color: T.t1 }} className="text-[12px] font-bold">Connected creators only</div>
+               <div className="text-[9.5px] mt-0.5" style={{ color: T.t4 }}>
+-                Terisi untuk sebagian roster — creator yang belum pernah dicek
+-                ikut tersembunyi saat ini dinyalakan.
++                Connected = creator sudah menghubungkan akunnya lewat OAuth.
++                Belum ada creator yang terhubung, jadi filter ini masih
++                mengembalikan 0 hasil sampai connect flow berjalan.
+               </div>
+             </div>
+-            <button type="button" role="switch" aria-checked={filters.verifiedOnly}
+-              onClick={() => onChange({ verifiedOnly: !filters.verifiedOnly })}
++            <button type="button" role="switch" aria-checked={filters.connectedOnly}
++              onClick={() => onChange({ connectedOnly: !filters.connectedOnly })}
+               className="w-[38px] h-[22px] rounded-xl relative flex-shrink-0 transition-colors"
+-              style={{ background: filters.verifiedOnly ? T.gradient : '#d1d5db' }}>
++              style={{ background: filters.connectedOnly ? T.gradient : '#d1d5db' }}>
+               <span className="absolute top-0.5 w-[18px] h-[18px] rounded-full bg-white transition-all"
+-                style={{ left: filters.verifiedOnly ? 18 : 2, boxShadow: '0 1px 3px rgba(0,0,0,.18)' }} />
++                style={{ left: filters.connectedOnly ? 18 : 2, boxShadow: '0 1px 3px rgba(0,0,0,.18)' }} />
+             </button>
+           </div>
+         </div>
+diff --git a/src/components/discover/KolDirectoryPage.tsx b/src/components/discover/KolDirectoryPage.tsx
+index afce786..0b79b0b 100644
+--- a/src/components/discover/KolDirectoryPage.tsx
++++ b/src/components/discover/KolDirectoryPage.tsx
+@@ -67,15 +67,17 @@ const PLATFORM_LABEL: Record<string, string> = {
+ const SORTOPTS: [SortKey, string][] = [
+   ['followers', 'Followers'],
+   ['engagement', 'Engagement'],
++  ['growth', 'Growth'],
+   ['recent', 'Last updated'],
+   ['name', 'Name'],
+ ]
+-type SortKey = 'followers' | 'engagement' | 'recent' | 'name'
++type SortKey = 'followers' | 'engagement' | 'growth' | 'recent' | 'name'
+ type SortState = { key: SortKey; dir: 'asc' | 'desc' }
+ 
+ /** Optional table columns — the source's COLDEFS. */
+ const COLDEFS: Record<string, { label: string; get: (r: KolDirectoryRow) => string; sort?: SortKey }> = {
+   tier: { label: 'Tier', get: r => r.tier ?? '—' },
++  growth: { label: 'Growth', get: r => growthLabel(r.growthPct), sort: 'growth' },
+   reach: { label: 'Est. Reach', get: r => reachLabel(r) },
+   platform: { label: 'Platform', get: r => (r.platform ? PLATFORM_LABEL[r.platform] ?? r.platform : '—') },
+   category: { label: 'Category', get: r => (r.categories.length ? r.categories.join(' · ') : '—') },
+@@ -114,6 +116,14 @@ function sinceLabel(iso: string | null): string {
+ }
+ 
+ const followersLabel = (n: number | null) => (n === null ? '—' : fmtNum(n))
++
++/**
++ * Change in followers since the account's PREVIOUS snapshot — 10-13 days apart
++ * today, not a month. Never label this "monthly" or "30d". Null for creators
++ * the pipeline has scraped only once, which is most of the roster.
++ */
++const growthLabel = (n: number | null) =>
++  (n === null ? '—' : `${n > 0 ? '+' : ''}${n.toFixed(2)}%`)
+ const erLabel = (er: number | null) => (er === null ? '—' : `${er.toFixed(2)}%`)
+ 
+ /**
+@@ -162,6 +172,8 @@ const EXPORT_COLUMNS: ExportColumn<KolDirectoryRow>[] = [
+   { key: 'followers', header: 'Followers', value: r => r.followers ?? '' },
+   { key: 'er', header: 'Engagement rate (%)', value: r => r.erPct ?? '' },
+   { key: 'tier', header: 'Tier', value: r => r.tier ?? '' },
++  { key: 'growth', header: 'Growth % (sejak snapshot terakhir)',
++    value: r => (r.growthPct === null ? '' : r.growthPct) },
+   { key: 'categories', header: 'Categories', value: r => r.categories.join(' · ') },
+   { key: 'status', header: 'Data status', value: r => r.status },
+   { key: 'updated', header: 'Last refreshed', value: r => r.lastRefreshedAt ?? '' },
+@@ -225,7 +237,7 @@ export default function KolDirectoryPage({
+   const [filtPanel, setFiltPanel] = useState(false)
+   const [fpOpen, setFpOpen] = useState<Set<string>>(new Set(['platform']))
+   const [cols, setCols] = useState<Record<ColKey, boolean>>({
+-    tier: true, reach: true, platform: true, category: false, updated: false,
++    tier: true, growth: true, reach: true, platform: true, category: false, updated: false,
+     // Rate card is on by default: it is the column a buyer opens the table for.
+     rate: true, agency: false,
+   })
+@@ -835,10 +847,14 @@ function CreatorCard({
+       <div className="w-[60px] h-[60px] rounded-[17px] border-4 border-white -mt-[34px] ml-4 flex items-center justify-center relative overflow-hidden"
+         style={{ background: banner, boxShadow: T.shadow }}>
+         <RosterAvatar src={c.avatarUrl} username={c.username} textClass="text-[22px]" />
+-        {c.verified && (
+-          <span className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full border-[2.5px] border-white flex items-center justify-center"
++        {/* Connected — the creator linked the account through OAuth. This is
++            not the platform's blue tick: that badge was dropped from Discovery,
++            so the icon is a link rather than a check to avoid reading as one. */}
++        {c.connected && (
++          <span title="Connected" aria-label="Connected"
++            className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full border-[2.5px] border-white flex items-center justify-center"
+             style={{ background: T.primary }}>
+-            <span className="material-symbols-outlined fill text-[11px] text-white">verified</span>
++            <span className="material-symbols-outlined fill text-[11px] text-white">link</span>
+           </span>
+         )}
+       </div>
+@@ -855,6 +871,7 @@ function CreatorCard({
+ 
+         <div className="flex gap-1.5 mt-[13px]">
+           <Stat label="Followers" value={followersLabel(c.followers)} />
++          <Stat label="Growth" value={growthLabel(c.growthPct)} />
+           <Stat label="Eng. Rate" value={erLabel(c.erPct)} />
+           <Stat label="Est. Reach" value={reachLabel(c)} />
+         </div>
+@@ -978,7 +995,8 @@ function DirectoryTable({
+                     <div className="min-w-0">
+                       <div style={{ ...PJ, color: T.t1 }} className="text-[12.5px] font-bold flex items-center gap-1.5 truncate">
+                         @{r.username}
+-                        {r.verified && <span className="material-symbols-outlined fill text-[13px]" style={{ color: T.primary }}>verified</span>}
++                        {r.connected && <span title="Connected" aria-label="Connected"
++                          className="material-symbols-outlined fill text-[13px]" style={{ color: T.primary }}>link</span>}
+                       </div>
+                       <div className="text-[10.5px] truncate max-w-[220px]" style={{ color: T.t4 }}>
+                         {r.categories.length ? r.categories.join(' · ') : '—'}
+diff --git a/src/lib/discover/kolDirectory.ts b/src/lib/discover/kolDirectory.ts
+index 28ba401..521c9ae 100644
+--- a/src/lib/discover/kolDirectory.ts
++++ b/src/lib/discover/kolDirectory.ts
+@@ -34,7 +34,15 @@ export interface KolDirectoryRow {
+   /** Percentage points, e.g. 0.98 means 0.98%. Null when never measured. */
+   erPct: number | null
+   tier: string | null
+-  verified: boolean
++  /**
++   * Percentage change in followers since this account's PREVIOUS snapshot,
++   * from `l2_gold.kol_profile_card.followers_growth`. The gap is whatever the
++   * scraper produced (10-13 days today), so never label it monthly or 30-day.
++   * Null for creators scraped only once, which is most of the roster.
++   */
++  growthPct: number | null
++  /** Business Connected: platform_user_id AND oauth_token both set. */
++  connected: boolean
+   status: KolDataStatus
+   lastRefreshedAt: string | null
+   /**
+@@ -95,7 +103,10 @@ export interface KolDirectoryQuery {
+    * "no price" is not one.
+    */
+   maxRate?: number | null
+-  verifiedOnly?: boolean
++  /** Percentage points. Null means no bound; 0 is a real bound, not "any". */
++  minGrowth?: number | null
++  maxGrowth?: number | null
++  connectedOnly?: boolean
+   sort?: string | null
+   dir?: string | null
+   page?: number
+@@ -116,6 +127,8 @@ const SORT_COLUMNS: Record<string, string> = {
+   // different question and a different column.
+   created: 'created_at',
+   name: 'username',
++  // Percentage change in followers since the account's previous snapshot.
++  growth: 'growth_pct',
+ }
+ export const KOL_SORT_KEYS = Object.keys(SORT_COLUMNS)
+ 
+@@ -172,7 +185,20 @@ const BASE = `
+          kd.followers_count                        AS followers,
+          kd.engagement_rate::float                 AS er_pct,
+          t.name                                    AS tier,
+-         (LOWER(COALESCE(kd.verified_status, '')) IN ('verified', 'true', 'yes')) AS verified,
++         -- Connected -- the business definition, not the platform's blue tick.
++         -- A creator is Connected when they have actually linked the account
++         -- through OAuth: social_account.platform_user_id AND oauth_token are
++         -- both present. kol_directory.verified_status (the old source) is the
++         -- platform badge and says nothing about connection, and
++         -- social_account.connected is a legacy column that is never filled.
++         EXISTS (
++           SELECT 1
++             FROM public.kol_social_account ksa
++             JOIN public.social_account sa ON sa.id = ksa.social_account_id
++            WHERE ksa.kol_id = kd.id
++              AND sa.platform_user_id IS NOT NULL
++              AND sa.oauth_token IS NOT NULL
++         )                                         AS connected,
+          -- Provenance, using the same three labels the rest of Discover uses:
+          -- a recent refresh is Live, an older row that was actually scraped
+          -- (see migration 004 in scrapper-project — scrape_status is kept in
+@@ -189,6 +215,7 @@ const BASE = `
+            WHEN kd.scrape_status = 'success'                      THEN 'Calculated'
+            ELSE 'Estimated'
+          END                                       AS status,
++         g.followers_growth::float                 AS growth_pct,
+          kd.last_refreshed_at,
+          -- Not mapped onto the row; carried so the list can be ordered by when
+          -- a creator was added, which is what the Discovery landing's "Recently
+@@ -207,6 +234,22 @@ const BASE = `
+         FROM public.kol_categories kc
+        WHERE kc.id = ANY (${CATEGORY_IDS})
+     ) cats ON TRUE
++    -- Follower growth, the only measured one that exists: L1 computes
++    -- (current - previous) / previous * 100 over consecutive profile
++    -- snapshots and l2_gold.kol_profile_card carries it through untouched.
++    -- LATERAL ... LIMIT 1 rather than a plain join so the roster row stays
++    -- one row even if a creator ever maps to more than one linked account;
++    -- ordered by followers to pick the same account the detail page shows.
++    -- Only followers_growth is read here: followers and tier stay on
++    -- kol_directory, which is the agreed source of truth for both.
++    LEFT JOIN LATERAL (
++      SELECT c.followers_growth
++        FROM public.kol_social_account ksa
++        JOIN l2_gold.kol_profile_card c ON c.social_account_id = ksa.social_account_id
++       WHERE ksa.kol_id = kd.id
++       ORDER BY c.followers_count DESC NULLS LAST
++       LIMIT 1
++    ) g ON TRUE
+    WHERE ${ACTIVE}`
+ 
+ /**
+@@ -270,7 +313,7 @@ export async function listKolDirectory(query: KolDirectoryQuery): Promise<KolDir
+     id: string; username: string | null; platform: string | null
+     profile_url: string | null; avatar_url: string | null; bio: string | null; city: string | null
+     categories: string[] | null; followers: number | null; er_pct: number | null
+-    tier: string | null; verified: boolean; status: KolDataStatus
++    tier: string | null; growth_pct: number | null; connected: boolean; status: KolDataStatus
+     last_refreshed_at: Date | string | null; total_count: number
+   }>(
+     `
+@@ -282,11 +325,13 @@ export async function listKolDirectory(query: KolDirectoryQuery): Promise<KolDir
+          AND ($3::text     IS NULL OR $3 = ANY (b.categories))
+          AND ($4::text[]   IS NULL OR b.tier = ANY ($4))
+          AND ($5::float8   IS NULL OR b.er_pct >= $5)
+-         AND ($6::boolean  IS NOT TRUE OR b.verified)
++         AND ($6::boolean  IS NOT TRUE OR b.connected)
+          AND ($9::bigint   IS NULL OR b.followers >= $9)
+          AND ($10::uuid[]  IS NULL OR b.id = ANY ($10))
+          -- Rate card ceiling. EXISTS rather than a join so a creator with three
+          -- priced deliverables stays one row; measured at 19ms over the roster.
++         AND ($12::float8  IS NULL OR b.growth_pct >= $12)
++         AND ($13::float8  IS NULL OR b.growth_pct <= $13)
+          AND ($11::bigint IS NULL OR EXISTS (
+                SELECT 1
+                  FROM public.kol_social_account ksa
+@@ -304,7 +349,7 @@ export async function listKolDirectory(query: KolDirectoryQuery): Promise<KolDir
+       query.category || null,
+       tiers,
+       query.minErPct ?? null,
+-      query.verifiedOnly === true,
++      query.connectedOnly === true,
+       pageSize,
+       (page - 1) * pageSize,
+       query.minFollowers ? Math.trunc(query.minFollowers) : null,
+@@ -312,6 +357,10 @@ export async function listKolDirectory(query: KolDirectoryQuery): Promise<KolDir
+       query.maxRate != null && Number.isFinite(query.maxRate)
+         ? Math.trunc(query.maxRate)
+         : null,
++      // Growth bounds are not truncated and 0 is meaningful: a creator can sit
++      // exactly at 0.0000%, and eight of them do.
++      query.minGrowth ?? null,
++      query.maxGrowth ?? null,
+     ],
+   )
+ 
+@@ -327,7 +376,8 @@ export async function listKolDirectory(query: KolDirectoryQuery): Promise<KolDir
+       followers: r.followers,
+       erPct: r.er_pct,
+       tier: r.tier,
+-      verified: r.verified,
++      growthPct: r.growth_pct,
++      connected: r.connected,
+       status: r.status,
+       lastRefreshedAt: toIso(r.last_refreshed_at),
+       // Filled by attachRosterExtras below; declared here so the row is never
+@@ -453,7 +503,7 @@ export interface KolCreatorPlatformRow {
+   profileUrl: string | null
+   followers: number | null
+   erPct: number | null
+-  verified: boolean
++  connected: boolean
+ }
+ 
+ /** A neighbour in the roster — same category where there is one, nearest in size. */
+@@ -505,7 +555,7 @@ export async function getKolCreator(id: string): Promise<KolCreatorPayload | nul
+     id: string; username: string | null; platform: string | null
+     profile_url: string | null; avatar_url: string | null; bio: string | null
+     city: string | null; categories: string[] | null; followers: number | null
+-    er_pct: number | null; tier: string | null; verified: boolean
++    er_pct: number | null; tier: string | null; growth_pct: number | null; connected: boolean
+     status: KolDataStatus; last_refreshed_at: Date | string | null
+     display_name: string | null; agency: string | null
+   }>(`
+@@ -586,11 +636,18 @@ export async function getKolCreator(id: string): Promise<KolCreatorPayload | nul
+     db.query<{
+       id: string; platform: string | null; username: string
+       profile_url: string | null; followers: number | null
+-      er_pct: number | null; verified: boolean
++      er_pct: number | null; connected: boolean
+     }>(`
+       SELECT kd.id, pl.key AS platform, kd.username, kd.profile_url,
+              kd.followers_count AS followers, kd.engagement_rate::float AS er_pct,
+-             (LOWER(COALESCE(kd.verified_status, '')) IN ('verified', 'true', 'yes')) AS verified
++             EXISTS (
++               SELECT 1
++                 FROM public.kol_social_account ksa
++                 JOIN public.social_account sa ON sa.id = ksa.social_account_id
++                WHERE ksa.kol_id = kd.id
++                  AND sa.platform_user_id IS NOT NULL
++                  AND sa.oauth_token IS NOT NULL
++             ) AS connected
+         FROM public.kol_directory kd
+         LEFT JOIN public.platforms pl ON pl.id = kd.platform_id
+        WHERE ${ACTIVE}
+@@ -652,7 +709,8 @@ export async function getKolCreator(id: string): Promise<KolCreatorPayload | nul
+       followers: r.followers,
+       erPct: r.er_pct,
+       tier: r.tier,
+-      verified: r.verified,
++      growthPct: r.growth_pct,
++      connected: r.connected,
+       status: r.status,
+       lastRefreshedAt: toIso(r.last_refreshed_at),
+       // Already in hand here: the agency comes from the join above and the
+@@ -693,7 +751,7 @@ export async function getKolCreator(id: string): Promise<KolCreatorPayload | nul
+       profileUrl: p.profile_url,
+       followers: p.followers,
+       erPct: p.er_pct,
+-      verified: p.verified,
++      connected: p.connected,
+     })),
+     similar: similar.rows.map(s => ({
+       id: s.id,
+diff --git a/src/lib/discover/kolGold.ts b/src/lib/discover/kolGold.ts
+index 6c3771b..ca9d569 100644
+--- a/src/lib/discover/kolGold.ts
++++ b/src/lib/discover/kolGold.ts
+@@ -101,6 +101,15 @@ export interface GoldProfileCard {
+   following: number | null
+   mediaCount: number | null
+   tier: string | null
++  /**
++   * Percentage change in followers between this snapshot and the account's
++   * previous one — `l1_silver.sp_build_unified_profile()` computes it and
++   * `kol_profile_card` carries it through unchanged. NOT a 30-day or monthly
++   * figure: the gap between snapshots is whatever the scraper produced (10-13
++   * days today), so it must be labelled "since last snapshot", never "monthly".
++   * Null when the account has only ever been scraped once.
++   */
++  followersGrowth: number | null
+   /** When the pipeline took this snapshot — the honest "last refreshed". */
+   snapshotDate: string | null
+ }
+@@ -334,12 +343,13 @@ export async function getKolGold(kolId: string): Promise<KolGold | null> {
+       website: string | null; is_verified: boolean | null; is_private: boolean | null
+       followers_count: string | null; following_count: string | null
+       media_count: string | null; tier: string | null
++      followers_growth: string | null
+       profile_snapshot_date: Date | string | null
+     }>(
+       `SELECT c.platform, c.username, c.display_name, c.avatar_url, c.profile_url,
+               c.bio, c.website, c.is_verified, c.is_private,
+               c.followers_count, c.following_count, c.media_count, c.tier,
+-              c.profile_snapshot_date
++              c.followers_growth, c.profile_snapshot_date
+          FROM public.kol_social_account ksa
+          JOIN l2_gold.kol_profile_card c ON c.social_account_id = ksa.social_account_id
+         WHERE ksa.kol_id = $1
+@@ -587,6 +597,7 @@ export async function getKolGold(kolId: string): Promise<KolGold | null> {
+       following: num(r.following_count),
+       mediaCount: num(r.media_count),
+       tier: r.tier,
++      followersGrowth: num(r.followers_growth),
+       snapshotDate: toDateOnly(r.profile_snapshot_date),
+     })),
+ 
