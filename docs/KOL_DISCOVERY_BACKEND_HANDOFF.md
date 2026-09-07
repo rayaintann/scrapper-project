@@ -81,6 +81,9 @@ EXISTS (
 ### Tier
 
 ```sql
+-- Sejak migration 033 ambang ini identik dengan public.kol_tiers, jadi
+-- LEFT JOIN ke kol_tiers menghasilkan jawaban yang sama dan itu yang
+-- dipakai Discovery. Migration 034 membuat L1/L2 ikut sama (P-01).
 CASE
   WHEN d.followers_count IS NULL   THEN NULL      -- 222 KOL  → lihat P-01
   WHEN d.followers_count <    1000 THEN NULL      -- 304 KOL  → lihat P-01
@@ -200,9 +203,16 @@ Ini yang paling penting dipahami sebelum menulis kode: **filternya akan benar, h
 | Kategori | **4.155** | 3.565 belum ada datanya |
 | Format konten | **30** | 7.690 belum ada datanya |
 | **Connected** | **0** | 7.720 belum ada datanya |
+| **Growth** | **25** | 1.951 KOL baru punya satu snapshot → growth NULL; 5.744 belum punya kartu L2 |
 
 Chip **Connected** akan selalu mengembalikan hasil kosong sampai ada kreator yang benar-benar
-menghubungkan akun. Ini bukan bug.
+menghubungkan akun. Ini bukan bug. Sejak 2026-09-07 Discovery memakai definisi bisnis
+(`social_account.platform_user_id IS NOT NULL AND social_account.oauth_token IS NOT NULL`);
+badge verified platform sudah **tidak lagi** ditampilkan di Discovery.
+
+Filter **Growth** juga hampir kosong dengan alasan berbeda: growth butuh DUA snapshot profil,
+dan 1.951 dari 1.976 akun ber-kartu baru di-scrape sekali. Angkanya akan naik sendiri seiring
+scraping berjalan — tidak ada yang perlu diperbaiki di kode.
 
 ---
 
@@ -211,12 +221,12 @@ menghubungkan akun. Ini bukan bug.
 | Jangan pakai | Alasan |
 |---|---|
 | `kol_directory.category_id` (skalar) | 1.183 KOL kehilangan kategori ke-2/ke-3 |
-| `l2_gold.kol_profile_card` sebagai sumber Followers/Tier | Sudah diputuskan bukan sumber resmi. Cuma mencakup 25,6% KOL |
-| Tabel `public.kol_tiers` | Batasnya kedaluwarsa (Macro 100rb–1jt) |
-| Kolom `tier` di `kol_profile_card` | Sama, batas kedaluwarsa |
+| `l2_gold.kol_profile_card` sebagai sumber Followers/Tier | Sudah diputuskan bukan sumber resmi. Cuma mencakup 25,6% KOL. **Tetap berlaku** — tapi lihat catatan Growth di bawah: kartu ini SATU-SATUNYA sumber `followers_growth` |
+| ~~Tabel `public.kol_tiers`~~ | ~~Batasnya kedaluwarsa (Macro 100rb–1jt)~~ **SUDAH DIPERBAIKI** oleh migration 033 (2026-09-07). Mid-tier kini 50rb–499.999, Macro 500rb–999.999. `kol_tiers` sekarang **boleh dan harus** dipakai |
+| ~~Kolom `tier` di `kol_profile_card`~~ | ~~Sama, batas kedaluwarsa~~ **SUDAH DIPERBAIKI**. Sumber resmi Followers/Tier Discovery tetap `kol_directory.followers_count` |
 | `social_account.connected` | Kolomnya ada, tapi **bukan** patokan resmi Connected |
 | `kol_directory.platform_user_id` untuk Connected | Itu hasil scraping, bukan bukti kreator menghubungkan akun |
-| `kol_profile_card.followers_growth` | Bukan pertumbuhan 30 hari |
+| ~~`kol_profile_card.followers_growth`~~ | ~~Bukan pertumbuhan 30 hari~~ **LARANGAN DICABUT** (keputusan produk 2026-09-07). Benar bahwa ini BUKAN pertumbuhan 30 hari — jendelanya 10–13 hari, yaitu jarak antar snapshot scrape. Produk menerima itu untuk sementara, dengan syarat **tidak pernah dilabeli "Monthly" atau "30 hari"**; label yang dipakai: "Sejak Snapshot Terakhir". Ini satu-satunya sumber Growth yang terukur, dan Discovery memakainya lewat `kol_directory → kol_social_account → kol_profile_card` |
 
 Ditambah: **jangan membuat keputusan produk baru**, dan **jangan mengubah database supaya
 prototype terlihat selesai**.
@@ -230,7 +240,7 @@ Diurutkan dari yang paling memblokir.
 | # | Hal | Tanya ke siapa | Kenapa perlu |
 |---|---|---|---|
 | 1 | **Endpoint ini dibuat di repo mana?** Repo `scrapper-project` ini isinya pipeline scraping dan sama sekali belum punya framework API. Aplikasinya sendiri kelihatannya TypeScript (`kolDirectory.ts`, `KolDirectoryFilters.tsx`) | Backend lead / arsitek | Menentukan apakah repo ini cukup menyediakan query layer saja, atau endpoint memang dibuat di sini |
-| 2 | **P-01 — 526 KOL di luar tier.** 304 KOL follower di bawah 1.000 + 222 tanpa data follower = 6,8% | **Product** | Dibuatkan kelompok `Unclassified`, atau dikeluarkan dari filter tier? **Masih PENDING, jangan diputuskan sendiri.** Sementara: kembalikan `tier: null` dan hitung di `total_unknown` |
+| 2 | ~~**P-01 — 526 KOL di luar tier.**~~ **SELESAI 2026-09-07.** Keputusan produk: `<1K` dan `NULL` **tidak mendapat tier** (`tier: null`), dan **tidak** dibuatkan kelompok `Unclassified`/`Unknown`. Migration 034 membuang fallback yang sebelumnya menjatuhkan 54 akun `<1K` ke `Nano` di L1/L2. Populasi 526 tetap dihitung terpisah oleh pemakai data | — | — |
 | 3 | **Connect flow mengisi `social_account.platform_user_id` atau tidak?** | Pemilik OAuth / connect flow (di luar repo ini) | Kalau tidak, Connected akan selamanya 0 meski OAuth sudah jalan |
 | 4 | **Siapa mengisi `category_ids` untuk KOL baru?** | Pemilik data / admin | Sekarang tidak ada jalur otomatis. KOL baru berisiko tidak berkategori |
 | 5 | **Chip yang hasilnya selalu kosong** (Connected, Tech 4 KOL, Story, YouTube) | Product / design | Disembunyikan, atau ditampilkan dengan keterangan "belum ada datanya"? |

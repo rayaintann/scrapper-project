@@ -82,7 +82,7 @@ Kalau satu filter kena beberapa kondisi, yang dipakai adalah **kondisi yang memb
 | Filter | Source | Total KOL | Data Tersedia | Usable | Coverage | Status |
 |---|---|---:|---:|---:|---:|---|
 | 1 · Platform | `kol_directory.platform_id` → `platforms.key` | 7.720 | 7.496 | 7.496 | 97,1% | **PARTIAL** |
-| 2 · Kategori KOL | `category_id` → `kol_categories.name` | 7.720 | 4.174 | 3.070 | 39,8% | **PARTIAL** |
+| 2 · Kategori KOL | `category_ids` → `kol_categories.taxonomy_key` | 7.720 | 4.174 | 4.155 | 53,82% | **PARTIAL** |
 | 3 · KOL Tier | `kol_directory.followers_count` | 7.720 | 7.498 | 7.194 | 93,2% | **PARTIAL** |
 | 3b · ↳ via L2 | `l2_gold.kol_profile_card.tier` | 7.720 | 1.972 | 1.972 | 25,5% | **PARTIAL** |
 | 4 · Gender skew | `audience_demographics_daily` (`gender`) | 7.720 | 23 | 17 | 0,22% | **DERIVED — INCOMPLETE** |
@@ -168,7 +168,7 @@ populasi hari ini.
 | Filter | Data | Usable | Coverage | Catatan |
 |---|---:|---:|---:|---|
 | Platform | 7.496 | 7.496 | 97,1% | Chip **YouTube** tidak punya baris sama sekali |
-| Kategori KOL | 4.174 | 3.070 | 39,8% | Hanya 6 dari 28 kategori DB beririsan dengan 5 chip UI |
+| Kategori KOL | 4.174 | 4.155 | 53,82% | 22 dari 28 kategori DB ter-map ke 9 Discovery Category |
 | KOL Tier | 7.498 | 7.194 | 93,2% | Dihitung dari `followers_count` |
 | Gender skew | 23 | 17 | 0,22% | Perlu renormalisasi `unknown` |
 | Verified only | 0 | 0 | 0% | Belum ada KOL yang connect |
@@ -185,16 +185,16 @@ Irisannya:
 
 | Chip UI | Kategori DB | KOL |
 |---|---|---:|
-| Lifestyle | `Lifestyle` | 1.915 |
-| Beauty | `Beauty` | 1.018 |
-| Food | `Foodies` 62 + `Food` 49 | 111 |
-| Fitness | `Fitness` | 24 |
-| Tech | `Technology and gadgets` | **2** |
-| | **Total usable** | **3.070** |
+| Lifestyle | `Lifestyle` | 2.592 |
+| Beauty | `Beauty` | 1.271 |
+| Food | `Foodies` + `Food` + `Cooking` | 123 |
+| Fitness | `Fitness` | 52 |
+| Tech | `Technology and gadgets` + `Gaming` | **4** |
+| | **Total usable** | **3.487** |
 
-**1.104 KOL berkategori jadi tidak terjangkau chip mana pun** — termasuk dua
-kategori terbesar berikutnya di database: `Entertainment` (436) dan `Moms` (378).
-Chip **Tech** secara praktis mati: hanya 2 KOL.
+**668 KOL berkategori jadi tidak terjangkau chip mana pun** — termasuk dua
+kategori terbesar berikutnya di database: `Entertainment` (501) dan `Moms` (589).
+Chip **Tech** secara praktis mati: hanya 4 KOL.
 
 **KOL Tier — coverage jauh lebih baik lewat `followers_count`, bukan L2.**
 Task 2 memetakan filter ini ke `kol_profile_card.tier` (1.972 KOL · 25,5%).
@@ -206,13 +206,13 @@ terisi untuk 7.498 KOL:
 | Nano 1K–10K | 1.943 |
 | Micro 10K–50K | 2.942 |
 | Mid-tier 50K–500K | 1.809 |
-| Macro 500K–1M | 191 |
-| Mega >1M | 309 |
+| Macro 500K–1M | 187 |
+| Mega >1M | 313 |
 | **Total masuk chip** | **7.194 · 93,2%** |
 | <1K (di luar semua chip) | 304 |
 | Tanpa data | 222 |
 
-**Selisihnya 3,7× lipat: 7.194 vs 1.972.** Tapi ada syaratnya — lihat §5.5 soal
+**Selisihnya 3,6× lipat: 7.194 vs 1.972.** Tapi ada syaratnya — lihat §5.5 soal
 batas tier UI yang berbeda dari tabel `kol_tiers`.
 
 **Gender skew — angka Task 2 perlu diperbaiki.** Task 2 §3.4 menyatakan 0 KOL
@@ -493,7 +493,7 @@ unik, jadi tidak bisa dipakai menyaring.
 |---|---|---:|
 | nama / handle | `kol_directory.username` | 7.497 · 97,1% ✅ |
 | nama tampilan | `kol_profile_card.display_name` | 1.958 · 25,4% |
-| kategori | `category_id` → `kol_categories.name` | 4.174 · 54,1% |
+| kategori | `category_ids` → `kol_categories.taxonomy_key` | 4.174 · 54,07% |
 | bio | `kol_directory.bio` | 902 · 11,7% |
 | bio *(L2)* | `kol_profile_card.bio` | 1.873 · 24,3% |
 | **niche** | — | **tidak ada kolom** |
@@ -651,20 +651,22 @@ Dua tier tengah **tidak cocok**, dan selisihnya besar. Akibatnya nyata:
 | | KOL |
 |---|---:|
 | "Macro" menurut `kol_profile_card.tier` *(batas DB)* | **1.123** |
-| "Macro" menurut batas UI 500K–1M | **191** |
+| "Macro" menurut batas UI 500K–1M | **187** |
 
-**Selisih 5,9×.** Selama batas ini belum diselaraskan, angka yang ditampilkan chip
+**Selisih 6,0×.** Selama batas ini belum diselaraskan, angka yang ditampilkan chip
 Tier akan berbeda tergantung sumber mana yang dipakai. Ini menjadi syarat sebelum
 rekomendasi §3.1 (hitung tier dari `followers_count`) bisa dijalankan.
 
 > **⚠️ Perbandingan di atas mencampur dua denominator (koreksi 2026-09-06).**
 > **1.123** dihitung dari kolom `kol_profile_card.tier` — populasinya hanya **1.972 kartu L2**.
-> **191** dihitung dari `followers_count` batas UI — populasinya **seluruh 7.720**.
-> Keduanya bukan ukuran yang sama, jadi "selisih 5,9×" tidak sah.
+> **187** dihitung dari `followers_count` batas UI — populasinya **seluruh 7.720**.
+> Keduanya bukan ukuran yang sama, jadi "selisih 6,0×" tidak sah.
 >
 > `KOL_DISCOVERY_AUDIT.md` §3.3 menghitung ulang dengan denominator yang seragam (seluruh
-> direktori, batas `kol_tiers`) dan mendapat **1.290**, selisih **6,8×**.
-> **NEEDS VERIFICATION (V-03):** angka mana yang dipakai untuk keputusan batas tier (D-01).
+> direktori, batas `kol_tiers`) dan mendapat **1.290**, selisih **6,9×**.
+> **TERVERIFIKASI (V-03, 2026-09-07):** ketiga angka benar dan mengukur hal berbeda —
+> **1.290** (direktori, batas lama) · **1.123** (1.976 kartu L2, batas lama) · **187**
+> (direktori, batas produk). Batas produk yang berlaku; **1.103 KOL** pindah Macro → Mid-Tier.
 > Kesimpulan §5.5 sendiri — bahwa batas UI dan `kol_tiers` tidak cocok — **tetap berlaku**.
 
 ### 5.6 `unknown` mendominasi data audiens
@@ -775,7 +777,7 @@ menyaring populasi secara berarti ada **lima**:
 | Section tabs *(Newly Added / Recently Updated)* | 99,7% |
 | KOL Tier *(kalau dipindah ke `followers_count`)* | 93,2% |
 
-Ditambah **Kategori** di 39,8% sebagai filter kelas dua.
+Ditambah **Kategori** di 53,82% sebagai filter kelas dua.
 
 **26 filter sisanya** akan menampilkan hasil kosong, hasil yang menyesatkan
 (karena menyembunyikan mayoritas populasi tanpa penjelasan), atau nilai yang
@@ -883,20 +885,20 @@ Satu re-scrape sekitar **17 September 2026** membuka growth 30D untuk **1.971 ak
 
 ## R4 — §5.5: dua denominator yang tercampur
 
-Sudah ditandai inline di §5.5. Ringkasnya: **1.123** dihitung atas 1.972 kartu L2, **191** atas
+Sudah ditandai inline di §5.5. Ringkasnya: **1.123** dihitung atas 1.972 kartu L2, **187** atas
 seluruh 7.720 — bukan perbandingan yang sah. Angka berdenominator seragam ada di
-`KOL_DISCOVERY_AUDIT.md` §3.3: **1.290 vs 191**, selisih 6,8×. **NEEDS VERIFICATION (V-03).**
+`KOL_DISCOVERY_AUDIT.md` §3.3: **1.290 vs 187**, selisih 6,9×. **TERVERIFIKASI (V-03, 2026-09-07).**
 
 ## R5 — §3.1 Kategori: irisan 5 chip sudah tidak relevan
 
-Tabel "Chip UI × Kategori DB" di §3.1 (total usable 3.070 · 39,8%) dihitung terhadap **5 chip
+Tabel "Chip UI × Kategori DB" di §3.1 (total usable 3.487) dihitung terhadap **5 chip
 hardcode prototype**. Migration `029` (2026-09-03, **sesudah** dokumen ini) menetapkan **9 Discovery
 Category** lewat `kol_categories.taxonomy_key`, memetakan 22 dari 28 kategori mentah.
 
-Dua keluhan di §3.1 karenanya **terselesaikan**: `Entertainment` (436) dan `Moms` (378) sekarang
-punya kategori sendiri, dan 1.104 KOL yang tadinya "tidak terjangkau chip mana pun" ikut tercakup.
-Coverage naik ke **±4.155 · ~53,8%** *(NEEDS VERIFICATION V-01/V-02 — angka dari commit message,
-bukan query ulang; dan kolom join yang benar `category_ids`, bukan `category_id`)*.
+Dua keluhan di §3.1 karenanya **terselesaikan**: `Entertainment` (501) dan `Moms` (589) sekarang
+punya kategori sendiri, dan 668 KOL yang tadinya "tidak terjangkau chip mana pun" ikut tercakup.
+Coverage naik ke **4.155 · 53,82%** *(TERVERIFIKASI V-01/V-02, 2026-09-07 — dihitung ulang lewat
+query; kolom join yang benar `category_ids`, bukan `category_id`)*.
 
 ## Ringkasan dampak
 
@@ -904,12 +906,12 @@ bukan query ulang; dan kolom join yang benar `category_ids`, bukan `category_id`
 |---|---|---|
 | §2 No. 24 Last Updated | **COMPLETE** · 97,1% | **PARTIAL** — 73,6% nilainya bukan jejak scrape |
 | Rekapitulasi | COMPLETE 1 · PARTIAL 14 | **COMPLETE 0 · PARTIAL 15** |
-| §2 No. 2 Kategori | 3.070 · 39,8% | **±4.155 · ~53,8%** lewat `taxonomy_key` |
+| §2 No. 2 Kategori | 3.070 · 39,8% | **4.155 · 53,82%** lewat `taxonomy_key` |
 | §3.1 keluhan 5 chip | Berlaku | **Terselesaikan** oleh taxonomy 9 kategori |
 | §3.5 / §4 Growth | Penghambat: threshold | **Penghambat: periode, lalu threshold** |
 | §3.5 Rising Creator | 21 punya field, 0 lolos | + syarat momentum **tidak bisa dievaluasi** (0 akun ≥3 snapshot) |
 | §3.6 Data Freshness | Penyebut tidak ada | **Pembilang dan penyebut sama-sama bermasalah** |
-| §5.5 Tier | 1.123 vs 191 · 5,9× | Denominator tercampur — pakai **1.290 vs 191 · 6,8×** *(V-03)* |
+| §5.5 Tier | 1.123 vs 191 · 5,9× | Denominator tercampur — pakai **1.290 vs 187 · 6,9×** *(V-03 terverifikasi)* |
 | Denominator filter | 32 | **40** *(baseline app)* |
 | §6.5 "yang bisa dipakai hari ini" | 5 filter | **6** — tambah Kategori lewat taxonomy; Last Updated tetap masuk tapi **dengan catatan semantik** |
 

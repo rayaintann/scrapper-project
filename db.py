@@ -191,6 +191,159 @@ def fetch_social_account_ids(
     return mapping
 
 
+# ---------------------------------------------------------------------------
+# Pencarian KOL Discovery — READ-ONLY
+# ---------------------------------------------------------------------------
+# Bagian ini melayani KOL Discovery, bukan pipeline scraping. Hanya membaca;
+# tidak ada jalur tulis dari sini.
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """Satu baris hasil pencarian KOL Discovery."""
+
+    id: str
+    username: str | None
+    display_name: str | None
+    platform: str | None
+    followers_count: int | None
+    discovery_category: str | None
+
+
+def _like_escape(term: str) -> str:
+    """Netralkan wildcard LIKE di dalam kata kunci dari pengguna.
+
+    Tanpa ini, mengetik '50%' membuat pola menjadi '%50%%' yang mencocokkan
+    hampir semua baris, dan '_' mencocokkan sembarang satu karakter. Backslash
+    di-escape lebih dulu supaya tidak merusak escape berikutnya.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# JOIN biasa, bukan LATERAL. Keduanya memberi hasil identik (30 baris untuk
+# 'beauty'), tapi LATERAL berjalan 2.080 ms karena kol_social_account tidak
+# punya indeks di kol_id sehingga nested loop men-scan tabel 7.720 kali.
+# Versi hash join di bawah: 11 ms — 185x lebih cepat.
+#
+# JOIN ini tidak menggandakan baris pada data sekarang: setiap kol_directory
+# punya tepat satu kol_social_account (7.496 baris, tidak ada yang dua) dan
+# tepat satu kol_profile_card. Kalau nanti satu KOL boleh punya akun di dua
+# platform sekaligus, tambahkan DISTINCT ON (k.id) — sampai saat itu DISTINCT
+# hanya menambah sort tanpa mengubah hasil.
+#
+# Kategori dibaca lewat kol_categories.taxonomy_key (Discovery Category),
+# bukan nama kategori mentah. EXISTS dipakai supaya category_ids yang
+# multi-nilai tidak melipatgandakan baris.
+_SEARCH_QUERY = """
+    SELECT k.id,
+           k.username,
+           pc.display_name,
+           p.key AS platform,
+           k.followers_count,
+           (SELECT string_agg(DISTINCT c.taxonomy_key, ', ' ORDER BY c.taxonomy_key)
+              FROM public.kol_categories c
+             WHERE c.id = ANY(k.category_ids)
+               AND c.taxonomy_key IS NOT NULL) AS discovery_category
+      FROM public.kol_directory k
+      LEFT JOIN public.platforms p            ON p.id = k.platform_id
+      LEFT JOIN public.kol_social_account ksa ON ksa.kol_id = k.id
+      LEFT JOIN l2_gold.kol_profile_card pc   ON pc.social_account_id = ksa.social_account_id
+     WHERE (%(q_contains)s::text IS NULL
+            OR k.username      ILIKE %(q_contains)s
+            OR pc.display_name ILIKE %(q_contains)s
+            OR k.bio           ILIKE %(q_contains)s)
+       AND (%(taxonomy)s::text IS NULL
+            OR EXISTS (SELECT 1
+                         FROM public.kol_categories c
+                        WHERE c.id = ANY(k.category_ids)
+                          AND c.taxonomy_key = %(taxonomy)s))
+     ORDER BY
+           CASE WHEN %(q_contains)s::text IS NULL              THEN 0
+                WHEN k.username      ILIKE %(q_prefix)s        THEN 1
+                WHEN k.username      ILIKE %(q_contains)s      THEN 2
+                WHEN pc.display_name ILIKE %(q_contains)s      THEN 3
+                ELSE 4
+           END,
+           k.followers_count DESC NULLS LAST,
+           k.id
+     LIMIT %(limit)s OFFSET %(offset)s
+"""
+
+
+def search_kol_directory(
+    conn,
+    q: str | None = None,
+    taxonomy_key: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[SearchResult]:
+    """Cari KOL di public.kol_directory untuk KOL Discovery.
+
+    Field yang dicari hanya yang benar-benar ada isinya di database:
+
+        k.username          7.497 dari 7.720  (97,1%)
+        pc.display_name     1.958             (25,4%, lewat kol_profile_card)
+        k.bio                 902             (11,7%)
+
+    Urutan hasil sengaja berjenjang, bukan sekadar followers: cocok di awal
+    username lebih relevan daripada cocok di tengahnya, dan cocok di bio paling
+    lemah karena kata bisa muncul di tengah kalimat. Tanpa penjenjangan itu,
+    'beauty' mengembalikan 135 baris yang tercampur rata; dengan penjenjangan,
+    14 yang usernamenya benar-benar mengandung 'beauty' muncul lebih dulu.
+
+    `taxonomy_key` menyaring lewat Discovery Category (kol_categories.taxonomy_key),
+    bukan nama kategori mentah — satu Discovery Category bisa menaungi beberapa
+    kategori mentah sekaligus.
+
+    q dan taxonomy_key yang None atau kosong berarti "jangan saring" — memanggil
+    tanpa argumen sama dengan menelusuri seluruh direktori.
+    """
+    term = (q or "").strip()
+    taxonomy = (taxonomy_key or "").strip() or None
+
+    if term:
+        escaped = _like_escape(term)
+        q_contains: str | None = f"%{escaped}%"
+        q_prefix: str | None = f"{escaped}%"
+    else:
+        q_contains = None
+        q_prefix = None
+
+    # Batas atas menjaga satu panggilan tidak menarik seluruh direktori ke
+    # memori karena salah ketik argumen.
+    params = {
+        "q_contains": q_contains,
+        "q_prefix": q_prefix,
+        "taxonomy": taxonomy,
+        "limit": max(1, min(int(limit), 200)),
+        "offset": max(0, int(offset)),
+    }
+
+    with conn.cursor() as cur:
+        cur.execute(_SEARCH_QUERY, params)
+        rows = [
+            SearchResult(
+                id=str(r[0]),
+                username=r[1],
+                display_name=r[2],
+                platform=r[3],
+                followers_count=r[4],
+                discovery_category=r[5],
+            )
+            for r in cur.fetchall()
+        ]
+
+    logger.info(
+        "Search KOL: %d hasil (q=%r, taxonomy=%r, limit=%d, offset=%d)",
+        len(rows),
+        term or None,
+        taxonomy,
+        params["limit"],
+        params["offset"],
+    )
+    return rows
+
+
 def dedupe_rows(rows: Sequence[DirectoryRow]) -> dict[str, list[DirectoryRow]]:
     """Kelompokkan baris per username ternormalisasi.
 
