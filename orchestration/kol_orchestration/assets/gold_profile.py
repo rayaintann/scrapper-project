@@ -92,6 +92,40 @@ KEPUTUSAN DESAIN
    Akun yang hilang dari `unified_profile` kartunya dibiarkan berdiri. Tabel
    ini dipakai untuk daftar/pencarian KOL; menghapus kartu karena satu batch
    scraping kebetulan tidak menyertakan akunnya akan membuat daftar berkedip.
+
+7. `is_verified` = BADGE PLATFORM, BUKAN Connected.
+   Verified dan Connected adalah dua hal berbeda dan tidak boleh saling
+   menggantikan:
+
+       verified  = centang biru dari platform (Instagram/TikTok)
+       connected = KOL benar-benar menautkan akunnya lewat OAuth, yaitu
+                   social_account.platform_user_id DAN oauth_token terisi
+
+   `l1_silver.unified_profile.is_verified` TIDAK memuat badge. Sejak
+   migration 031 kolom itu diisi ekspresi Connected:
+
+       (sa.platform_user_id IS NOT NULL AND sa.oauth_token IS NOT NULL)
+
+   Akibatnya badge platform hilang tepat di L1. Terukur 2026-09-08: seluruh
+   2.010 baris L1 bernilai false (karena 0 akun Connected), padahal sumbernya
+   masih utuh -- 457 akun Instagram dan 115 akun TikTok ber-badge true, total
+   572 akun. Kartu L2 mewarisi kesalahan itu: 1.979 kartu, 0 true.
+
+   Asset ini karena itu TIDAK LAGI membaca `p.is_verified`, melainkan
+   mengambil badge dari sumbernya langsung (lihat CTE `badge`). Setelah
+   perubahan ini tidak ada satu pun pembaca `unified_profile.is_verified`
+   yang tersisa, jadi kolom L1 itu menjadi tidak terpakai -- diperiksa:
+   satu-satunya pembaca lain, audience.py, memakai `unified_follower`, tabel
+   yang berbeda.
+
+   YANG SENGAJA TIDAK DIKERJAKAN DI SINI:
+   memperbaiki `l1_silver.unified_profile.is_verified` itu sendiri butuh
+   ALTER TABLE pada l0_harmonization.instagram_profile (kolomnya belum ada)
+   ditambah dua prosedur ditulis ulang. Itu perubahan schema, sementara
+   perbaikan di layer ini sudah cukup untuk mengembalikan badge ke UI tanpa
+   menyentuh schema sama sekali. Definisi Connected TIDAK diubah: endpoint
+   menghitungnya sendiri dari social_account dan tidak pernah membaca kolom
+   ini.
 """
 
 from __future__ import annotations
@@ -108,19 +142,59 @@ _PROFILE = AssetKey("unified_profile")
 # CTE bersama untuk statistik dan upsert
 # ---------------------------------------------------------------------------
 _CTE = """
-    WITH terbaru AS (
+    WITH badge AS (
+        -- BADGE PLATFORM (centang biru), bukan Connected. Lihat keputusan #7.
+        --
+        -- TikTok diambil dari harmonization, lapisan bersih tertinggi yang
+        -- memang membawa kolomnya. Instagram diambil dari l0_raw karena
+        -- l0_harmonization.instagram_profile TIDAK punya kolom is_verified --
+        -- satu-satunya tempat badge Instagram tersimpan adalah
+        -- raw_payload->>'verified' (terukur: ada di 959 dari 959 baris).
+        -- Menambah kolom itu ke harmonization adalah perubahan schema, dan
+        -- sengaja TIDAK dilakukan di sini; lihat keputusan #7.
+        -- Tiap cabang dibungkus subquery: ORDER BY milik DISTINCT ON tidak
+        -- boleh berdiri tepat sebelum UNION.
+        SELECT * FROM (
+            SELECT DISTINCT ON (r.social_account_id)
+                   r.social_account_id,
+                   'instagram'::text                     AS platform,
+                   (r.raw_payload->>'verified')::boolean  AS is_verified
+              FROM l0_raw.ig_profile_apify r
+             WHERE r.social_account_id IS NOT NULL
+             ORDER BY r.social_account_id, r.scraped_at DESC
+        ) ig
+        UNION ALL
+        SELECT * FROM (
+            SELECT DISTINCT ON (h.social_account_id)
+                   h.social_account_id,
+                   'tiktok'::text                        AS platform,
+                   h.is_verified
+              FROM l0_harmonization.tiktok_profile h
+             WHERE h.social_account_id IS NOT NULL
+             ORDER BY h.social_account_id, h.date DESC
+        ) tt
+    ),
+    terbaru AS (
         SELECT DISTINCT ON (p.social_account_id, pl.key)
                p.social_account_id,
                pl.key            AS platform,
                p.date            AS profile_snapshot_date,
                p.username, p.display_name, p.avatar_url, p.profile_url,
-               p.bio, p.website, p.is_verified, p.is_private,
+               p.bio, p.website,
+               -- BADGE PLATFORM, bukan p.is_verified. Kolom L1 itu berisi
+               -- status Connected (lihat keputusan #7) dan sejak asset ini
+               -- berhenti membacanya, tidak ada lagi yang memakainya.
+               b.is_verified,
+               p.is_private,
                p.followers_count, p.following_count, p.media_count,
                p.tier,
                -- PERSEN, dari snapshot yang sama. Tidak dihitung ulang.
                p.followers_growth
         FROM l1_silver.unified_profile p
         JOIN public.platforms pl ON pl.id = p.platform_id
+        LEFT JOIN badge b
+               ON b.social_account_id = p.social_account_id
+              AND b.platform = pl.key
         WHERE p.social_account_id IS NOT NULL
         -- tie-break eksplisit supaya hasilnya deterministik
         ORDER BY p.social_account_id, pl.key,
