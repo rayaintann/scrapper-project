@@ -79,6 +79,7 @@ from post_raw_store import (
     TT_TABLE,
     insert_ig_posts,
     insert_tt_videos,
+    latest_posts,
     split_new_and_duplicate,
 )
 from raw_store import insert_profiles as insert_ig_profiles
@@ -209,21 +210,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _sort_key(item: dict, key: str) -> str:
-    value = item.get(key)
-    return value if isinstance(value, str) else ""
-
-
-def latest_posts(items, posted_at_key: str, limit: int = POSTS_PER_TARGET) -> list[dict]:
-    """`limit` post TERBARU dari satu akun, diurutkan waktu tayang menurun.
-
-    Tetap dipakai walau actor sudah dibatasi `resultsLimit`: batas actor tidak
-    menjamin urutan. Post tanpa timestamp diberi kunci kosong supaya selalu
-    kalah dari post yang punya.
-    """
-    posts = [i for i in items if isinstance(i, dict)]
-    posts.sort(key=lambda i: _sort_key(i, posted_at_key), reverse=True)
-    return posts[:limit]
+# `latest_posts` pindah ke post_raw_store supaya post_pipeline dan Scheduler
+# Engine memakai aturan "N terbaru per akun" yang sama persis, bukan dua salinan
+# yang bisa berbeda. Diimpor di bagian atas file ini.
 
 
 def count_rows(conn, table: str, social_account_id: str) -> int:

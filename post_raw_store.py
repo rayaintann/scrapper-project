@@ -52,6 +52,14 @@ class PostInsertStats:
     skipped_error: int = 0
     skipped_no_username: int = 0
     skipped_no_content_id: int = 0
+    # Post yang pemiliknya tidak ada di roster (tidak punya baris
+    # public.social_account untuk platform itu). Dibuang SEBELUM INSERT, bukan
+    # ditulis dengan social_account_id NULL: barisnya tidak akan pernah bisa
+    # ditautkan, jadi tidak akan pernah mengalir ke harmonization maupun L1.
+    skipped_non_roster: int = 0
+    # Post yang terbuang karena pemiliknya sudah punya `per_account_limit`
+    # post yang lebih baru di batch yang sama.
+    skipped_over_limit: int = 0
     link_blocked_reason: str | None = None
     # (username, kode, pesan) untuk tiap item error yang disaring.
     errors: list[tuple[str | None, str, str]] = field(default_factory=list)
@@ -182,6 +190,95 @@ def _account_ids(
     return fetch_social_account_ids(conn, [u for u, _ in usable], platform_key=platform_key)
 
 
+# --- kepemilikan & batas per pemilik ----------------------------------------
+#
+# Actor mengembalikan post yang muncul di feed profil, BUKAN hanya post milik
+# profil itu: post kolaborasi dan tag ikut terbawa, dan pemiliknya orang lain.
+# Terukur pada scrape 20 Agustus — tiap URL mengembalikan tepat 10 item, tapi
+# yang benar-benar milik profil hanya 1-10 (rata-rata 6,8).
+#
+# `resultsLimit` di sisi actor tidak bisa menutup itu: ia membatasi JUMLAH
+# hasil, bukan kepemilikannya. Jadi pembatasannya dikerjakan di sini, sesudah
+# `ownerUsername` di-resolve ke social_account.
+#
+# Pemilik dikelompokkan lewat `social_account_id`, BUKAN lewat URL yang diminta.
+# Satu KOL yang muncul dari dua URL berbeda tetap dibatasi 10 total, bukan 10
+# per URL.
+
+
+def _sort_key(item: dict, key: str) -> str:
+    value = item.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def latest_posts(items, posted_at_key: str, limit: int = 10) -> list[dict]:
+    """`limit` post TERBARU dari satu akun, diurutkan waktu tayang menurun.
+
+    Tetap dipakai walau actor sudah dibatasi `resultsLimit`: batas actor tidak
+    menjamin urutan. Post tanpa timestamp diberi kunci kosong supaya selalu
+    kalah dari post yang punya.
+
+    Tinggal di modul ini, bukan di `scheduler_engine`, supaya `post_pipeline`
+    dan Scheduler Engine memakai aturan yang sama persis. `scheduler_engine`
+    sudah mengimpor modul ini, jadi arah impornya tetap satu arah.
+    """
+    posts = [i for i in items if isinstance(i, dict)]
+    posts.sort(key=lambda i: _sort_key(i, posted_at_key), reverse=True)
+    return posts[:limit]
+
+
+def _filter_owned(
+    usable: list[tuple[str, dict]],
+    account_ids: dict[str, str],
+    posted_at_key: str,
+    per_account_limit: int | None,
+    stats: PostInsertStats,
+) -> list[tuple[str, dict]]:
+    """Sisakan post yang pemiliknya ada di roster, maksimal N terbaru per pemilik.
+
+    Tiga kategori item, dan hanya kategori ketiga yang dibuang:
+
+      1. milik akun yang diminta            -> disimpan, tertaut ke akun itu
+      2. milik KOL roster LAIN              -> disimpan, tertaut ke PEMILIK
+                                               SEBENARNYA, bukan ke akun yang
+                                               diminta. Post itu memang miliknya
+                                               dan datanya sah.
+      3. milik akun di luar roster          -> DIBUANG
+
+    Kategori 2 sengaja tidak ikut dibuang: menyaring dengan "owner harus sama
+    dengan username yang diminta" akan membuang post KOL roster yang sah.
+    Terukur: `tasyafarasya` dan `raffinagita1717` muncul sebagai pemilik pada
+    scrape akun lain, dan keduanya punya baris social_account sendiri.
+
+    `per_account_limit=None` berarti tanpa batas — perilaku lama, supaya
+    pemanggil yang belum meneruskan batas tidak berubah diam-diam.
+    """
+    per_owner: dict[str, list[tuple[str, dict]]] = {}
+    for username, item in usable:
+        if not account_ids.get(username):
+            stats.skipped_non_roster += 1
+            continue
+        # Kunci pengelompokan = social_account_id (pemilik sebenarnya), bukan
+        # username mentah maupun URL yang diminta.
+        per_owner.setdefault(account_ids[username], []).append((username, item))
+
+    if per_account_limit is None:
+        return [pair for pairs in per_owner.values() for pair in pairs]
+
+    tersisa: list[tuple[str, dict]] = []
+    for pairs in per_owner.values():
+        if len(pairs) <= per_account_limit:
+            tersisa.extend(pairs)
+            continue
+        # `latest_posts` bekerja pada item; pasangkan lagi ke username-nya lewat
+        # identitas objek supaya tidak bergantung pada isi item.
+        terpilih = latest_posts([item for _, item in pairs], posted_at_key, per_account_limit)
+        dipilih = {id(item) for item in terpilih}
+        tersisa.extend(pair for pair in pairs if id(pair[1]) in dipilih)
+        stats.skipped_over_limit += len(pairs) - len(terpilih)
+    return tersisa
+
+
 # --- deduplication ----------------------------------------------------------
 #
 # Kedua tabel post sengaja TIDAK punya unique constraint: keduanya menyimpan
@@ -275,6 +372,7 @@ def insert_ig_posts(
     scrape_run_id: str | None = None,
     commit: bool = True,
     account_ids: dict[str, str] | None = None,
+    per_account_limit: int | None = None,
 ) -> PostInsertStats:
     """Masukkan post Instagram ke `l0_raw.ig_media_snapshots_apify`."""
     stats = PostInsertStats(
@@ -288,6 +386,19 @@ def insert_ig_posts(
         return stats
 
     account_ids = _account_ids(conn, stats, usable, "instagram", account_ids)
+    # Penyaringan kepemilikan hanya masuk akal kalau penautan memang bisa
+    # dilakukan. Saat `link_blocked_reason` terisi, `account_ids` sengaja kosong
+    # dan MEMBUANG semuanya justru menghapus data yang seharusnya tetap masuk.
+    if not stats.link_blocked_reason:
+        usable = _filter_owned(
+            usable, account_ids, "timestamp", per_account_limit, stats
+        )
+        if not usable:
+            logger.warning(
+                "%s: tidak ada post tersisa (non-roster=%d, lewat batas=%d)",
+                IG_TABLE, stats.skipped_non_roster, stats.skipped_over_limit,
+            )
+            return stats
 
     payload = []
     for username, item in usable:
@@ -367,6 +478,7 @@ def insert_tt_videos(
     scrape_run_id: str | None = None,
     commit: bool = True,
     account_ids: dict[str, str] | None = None,
+    per_account_limit: int | None = None,
 ) -> PostInsertStats:
     """Masukkan video TikTok ke `l0_raw.tt_video_apify`."""
     stats = PostInsertStats(
@@ -380,6 +492,17 @@ def insert_tt_videos(
         return stats
 
     account_ids = _account_ids(conn, stats, usable, "tiktok", account_ids)
+    # Lihat alasan penjaga `link_blocked_reason` di insert_ig_posts.
+    if not stats.link_blocked_reason:
+        usable = _filter_owned(
+            usable, account_ids, "createTimeISO", per_account_limit, stats
+        )
+        if not usable:
+            logger.warning(
+                "%s: tidak ada video tersisa (non-roster=%d, lewat batas=%d)",
+                TT_TABLE, stats.skipped_non_roster, stats.skipped_over_limit,
+            )
+            return stats
 
     payload = []
     for username, item in usable:

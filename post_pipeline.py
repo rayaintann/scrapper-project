@@ -97,7 +97,8 @@ def _build_scraper(platform: str, cfg, results: int, max_charge: float | None):
     )
 
 
-def _insert(platform: str, conn, items, username_of, actor, scraped_at, run_id):
+def _insert(platform: str, conn, items, username_of, actor, scraped_at, run_id,
+            per_account_limit=None):
     fn = insert_ig_posts if platform == "instagram" else insert_tt_videos
     return fn(
         conn,
@@ -107,6 +108,7 @@ def _insert(platform: str, conn, items, username_of, actor, scraped_at, run_id):
         scraped_at=scraped_at,
         scrape_run_id=run_id,
         commit=True,
+        per_account_limit=per_account_limit,
     )
 
 
@@ -224,9 +226,7 @@ def main(argv=None) -> int:
     platform = args.platform
     started_at = _now()
     run_id = str(uuid.uuid4())
-    actor = (
-        cfg.apify.actor_id if platform == "instagram" else cfg.tiktok.actor_id
-    )
+    actor = _build_scraper(platform, cfg, args.results, args.max_charge_usd)._actor_id
     if args.from_file:
         actor = f"replay:{args.from_file.name}"
 
@@ -329,8 +329,12 @@ def main(argv=None) -> int:
                         stats.per_account[u] = stats.per_account.get(u, 0) + 1
             logger.info("[--no-write] L0 tidak disentuh.")
         else:
+            # `--results` adalah plafon yang diminta ke actor; dipakai lagi di
+            # sini sebagai plafon per PEMILIK, karena batas actor terbukti tidak
+            # menjamin jumlah maupun kepemilikan.
             stats = _insert(
-                platform, conn, items_all, scraper.item_username, actor, scraped_at, run_id
+                platform, conn, items_all, scraper.item_username, actor, scraped_at, run_id,
+                per_account_limit=args.results,
             )
 
         finished_at = _now()
