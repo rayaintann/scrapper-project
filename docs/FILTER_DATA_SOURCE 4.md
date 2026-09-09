@@ -4,7 +4,60 @@
 Kalau ada beberapa kandidat, pilih satu dan tulis alasannya.
 
 **Dasar:** Task 2 (apa yang ada di database) dan Task 3 (seberapa lengkap isinya).
-**Terakhir diperbarui:** 2026-09-07 · **Jumlah KOL:** 7.720
+**Terakhir diperbarui:** 2026-09-09 · **Jumlah KOL:** 7.720
+
+> ## UPDATE 2026-09-09 — enam keputusan sumber berubah
+>
+> Diverifikasi terhadap kode yang **sudah ter-commit**: `scrapper-project` @ `fa3af27`,
+> `autometric` @ `232da34`. Angka database dari pengukuran read-only 8 September 2026.
+>
+> | Filter | Sumber di dokumen ini | **Sumber yang benar-benar dipakai sekarang** |
+> |---|---|---|
+> | **Verified** | ~~`kol_directory.verified_status`~~ → dihapus | **`l2_gold.kol_profile_card.is_verified`** · **572** — dipakai lagi, sumbu terpisah dari Connected |
+> | **Engagement rate** | `kol_directory.engagement_rate` (1.756) | **`COALESCE(feature.{ig,tt}_engagement_analysis.engagement_rate, kol_directory.engagement_rate)`** · **1.767** |
+> | **Kategori** | `kol_categories.taxonomy_key` | **sama** — tapi baru sejak `232da34` endpoint benar-benar memakainya. Sebelumnya menyaring pakai `name` |
+> | **Avatar · Bio · Display name** | `kol_directory.*` | **`COALESCE(kol_profile_card.*, kol_directory.*)`** — avatar 931 → **1.979**, bio 902 → **1.878**, display name 0 → **1.961** |
+> | **Last Updated** | *(tidak ada keputusannya)* | **`kol_directory.last_refreshed_at`** — dipakai jadi filter `?updatedWithin=` dan sort `recent` |
+> | **Agency** | *(tidak pernah dinilai)* | **`agency_kol_accounts` + `agencies`** · **7.684 dari 7.718** |
+>
+> **Yang TIDAK berubah:** Followers dan Tier tetap dari `kol_directory.followers_count`
+> (P-02 tetap berlaku), Connected tetap `platform_user_id` + `oauth_token`, Growth tetap
+> `kol_profile_card.followers_growth` berlabel "Sejak Snapshot Terakhir".
+>
+> **Satu baris di §"Sumber yang jangan dipakai" perlu dibaca ulang.**
+> `kol_directory.last_refreshed_at` masih **tidak boleh dipercaya sebagai penanda kapan
+> data di-scrape** — 73,6% nilainya warisan impor Excel, dan diverifikasi ia **selalu**
+> lebih tua dari `profile_snapshot_date` L2 (1.024 dari 1.024 kasus). Tapi kolom itu
+> **sudah dipakai** untuk filter "Last Updated" dan sort "Last updated". Yang dijual ke
+> pengguna adalah *"kapan baris ini terakhir disentuh"*, bukan *"kapan di-scrape"* —
+> perbedaan itu harus dijaga di label UI.
+>
+> **Rate card: keputusan "tidak ada sumber" gugur.** Sumbernya ada dan lengkap di
+> `l0_raw.kol_roster_import` (7.718 baris / 7.496 KOL, 7 kolom harga terisi), dan kedua
+> procedure-nya (`sp_sync_roster_rate_card`, `sp_build_unified_rate_card`) sudah ada.
+> `l1_silver.unified_rate_card` tetap **0 baris** karena tidak ada asset Dagster yang
+> memanggil procedure itu. Akibatnya filter `maxRate` **aktif dan selalu mengembalikan
+> 0 dari 7.720** — bukan filter yang belum dibuat, melainkan filter yang benar di atas
+> tabel kosong.
+>
+> **Pencarian nama: rancangan dan implementasi belum sama.** Dokumen ini memutuskan
+> tiga kolom digabung (`username` + `bio` + `display_name`). Yang ter-implementasi:
+>
+> | Implementasi | Kolom yang dicari |
+> |---|---|
+> | `db.search_kol_directory()` (repo ini, CLI `search_kol.py`) | username + display_name + bio, dengan penjenjangan relevansi ✅ |
+> | `kolDirectory.ts` (halaman Discovery) | **`username` saja** ⚠ |
+>
+> **Followers: satu sumber resmi, dua nilai nyata.** `kol_directory.followers_count` dan
+> `l2_gold.kol_profile_card.followers_count` berbeda untuk **1.024 dari 1.972** akun.
+> Penyebabnya dua dan berlawanan — ~970 roster basi (L2 benar) dan **54 scrape TikTok
+> rusak** (roster benar). Aturan "satu filter, satu sumber" tetap dipegang: **roster**.
+> Migration 035 memasang sanity guard di `sp_build_unified_profile()` supaya nilai runtuh
+> tidak jadi penyebut growth berikutnya (51 baris → NULL). Yang **belum** diputuskan:
+> UI menampilkan follower roster sementara growth dihitung dari follower L2, jadi kedua
+> angka itu belum bisa direkonsiliasi.
+
+---
 
 > **Status implementasi (2026-09-07).** Tiga keputusan di dokumen ini sudah
 > dijalankan dan terverifikasi, jadi dua baris "jangan pakai" di bawah **berubah**:
@@ -38,11 +91,13 @@ Tiga aturan yang dipakai saat ada lebih dari satu kandidat:
 
 | Filter | Sumber yang dipakai | Terisi | Kenapa ini |
 |---|---|---|---|
-| **Cari nama** | `kol_directory.username` + `.bio`, digabung `kol_profile_card.display_name` | 97,1% · 11,7% · 25,4% | Tiga kolom digabung supaya hasil pencarian selengkap mungkin |
+| **Cari nama** | `kol_directory.username` + `.bio`, digabung `kol_profile_card.display_name` | 97,1% · 11,7% · 25,4% | Tiga kolom digabung supaya hasil pencarian selengkap mungkin. **2026-09-09:** keputusan ini baru terpenuhi di `db.search_kol_directory()`; endpoint Discovery (`kolDirectory.ts`) masih `username` saja |
 | **Platform** | `platforms.key` | 97,1% | Satu-satunya sumber platform |
 | **Tier** | `kol_directory.followers_count`, **dihitung saat query** | 97,1% | Lihat penjelasan di bawah |
 | **Minimum follower** | `kol_directory.followers_count` | 97,1% | Sumber yang sama dengan Tier |
-| **Kategori** | `kol_directory.category_ids` → `kol_categories.taxonomy_key` | 53,8% | Lihat penjelasan di bawah |
+| **Kategori** | `kol_directory.category_ids` → `kol_categories.taxonomy_key` | 53,8% | Lihat penjelasan di bawah. **2026-09-09:** endpoint Discovery memakai `COALESCE(taxonomy_key, name)` — 15 chip, karena 6 dari 28 nama belum punya `taxonomy_key` |
+| **Last Updated** *(baru 2026-09-09)* | `kol_directory.last_refreshed_at` | 97,1% | Satu-satunya kolom waktu di roster. **Artinya tetap cacat** — 73,6% warisan impor Excel — jadi labelnya harus "terakhir disentuh", bukan "terakhir di-scrape" |
+| **Agency** *(baru 2026-09-09)* | `agency_kol_accounts` + `agencies` | 7.684 / 7.718 | Dipakai lewat `EXISTS`, bukan `JOIN`, supaya kreator yang terdaftar di dua agency tetap satu baris |
 
 ### Filter yang sumbernya pasti tapi datanya masih tipis
 
@@ -50,7 +105,7 @@ Sumbernya sudah tidak perlu diperdebatkan. Yang kurang cuma jumlah barisnya.
 
 | Filter | Sumber yang dipakai | Terisi |
 |---|---|---|
-| Engagement rate | `kol_directory.engagement_rate` | 1.756 · 22,7% |
+| Engagement rate | **2026-09-09:** `COALESCE(feature.{ig,tt}_engagement_analysis.engagement_rate, kol_directory.engagement_rate)` | **1.767** · 22,9% |
 | Format konten | `content_format_daily.media_type` | 30 · 0,39% |
 | Views | `post_metric.views` | 30 · 0,39% |
 | Rasio konten berbayar | `post_metric.is_sponsored` | 30 · 0,39% |
@@ -60,12 +115,17 @@ Sumbernya sudah tidak perlu diperdebatkan. Yang kurang cuma jumlah barisnya.
 | Minat audiens | `audience_interest_daily` | 23 · 0,30% |
 | Kualitas audiens | `feature.ig_audience_analysis` + `tt_audience_analysis` | 23 · 0,30% |
 | **Connected** | `social_account.oauth_token` + `social_account.platform_user_id` | 0 · 0% |
-| ~~Verified~~ | ~~`kol_directory.verified_status`~~ | ~~931 · 12,1%~~ |
+| **Verified** *(kembali 2026-09-09)* | **`l2_gold.kol_profile_card.is_verified`** — bukan `kol_directory.verified_status` | **572** |
 | **Growth** *(baru)* | `l2_gold.kol_profile_card.followers_growth` | 25 · 0,32% |
 
-**UPDATE 2026-09-07 — Verified dihapus dari Discovery.** Keputusan produk: badge verified
-platform tidak dipertahankan sebagai field terpisah. Discovery hanya punya **Connected**.
-454 badge yang dulu tampil di kartu dan tabel sudah dilepas.
+~~**UPDATE 2026-09-07 — Verified dihapus dari Discovery.**~~ **DIBALIK 2026-09-09.**
+Badge verified kembali sebagai field dan filter, tapi **bukan** dari
+`kol_directory.verified_status` (454). Sumbernya sekarang
+`l2_gold.kol_profile_card.is_verified` — **572 KOL** — yang diisi dari badge platform
+asli di L0: `ig_profile_apify.raw_payload->>'verified'` (470 true) dan
+`l0_harmonization.tiktok_profile.is_verified` (124 true). Discovery punya **dua** sumbu:
+Connected (0) dan Verified (572), dengan ikon berbeda. Karena 572 ≠ 0, salah satu tidak
+bisa mewakili yang lain.
 
 **UPDATE 2026-09-07 — Growth masuk daftar ini.** Sumbernya `kol_profile_card.followers_growth`,
 diambil lewat `kol_directory → kol_social_account → kol_profile_card`. Followers dan Tier

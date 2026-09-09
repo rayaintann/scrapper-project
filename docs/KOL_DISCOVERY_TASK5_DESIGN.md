@@ -1,7 +1,7 @@
 # Task 5 — Struktur Data Filter untuk Dikembangkan
 
-**Status:** Rev 2 · siap direview
-**Terakhir diperbarui:** 2026-09-07
+**Status:** Rev 3 · sebagian sudah diimplementasikan
+**Terakhir diperbarui:** 2026-09-09
 **Jumlah KOL:** 7.720 (`public.kol_directory`)
 
 **Tugas:** menyusun struktur data filter yang akan dipakai developer — daftar kolom,
@@ -9,8 +9,11 @@ tipenya, diambil dari mana, dan cara menghitungnya.
 
 **Dasar:** Task 4 (sumber tiap filter) dan hasil pengecekan langsung ke database.
 
-> Dokumen ini **rancangan**, bukan hasil kerja. Tidak ada tabel, kolom, atau kode yang dibuat di sini.
-> Semua angka sudah dicek langsung ke database pada 2026-09-07 dengan sambungan **read-only**.
+> Dokumen ini lahir sebagai **rancangan** — tidak ada tabel, kolom, atau kode yang dibuat
+> di sini, dan angka §2–§10 dicek ke database 2026-09-07 lewat sambungan **read-only**.
+> **Per 2026-09-09 sebagian rancangan itu sudah jadi kode yang berjalan.** Bacalah blok
+> STATUS 2026-09-09 di bawah lebih dulu: kalau ia bertentangan dengan §2–§10,
+> **implementasi yang berlaku**.
 
 ---
 
@@ -24,6 +27,72 @@ tipenya, diambil dari mana, dan cara menghitungnya.
 | **Datanya tidak ada** | 1 | Profiling Status — dikeluarkan dari rencana |
 
 **Empat filter siap dikerjakan:** Cari nama · Platform · Kategori · Tier.
+
+> ## STATUS 2026-09-09 — rancangan ini sebagian sudah dilewati implementasi
+>
+> Diverifikasi terhadap kode ter-commit: `scrapper-project` @ `fa3af27`,
+> `autometric` @ `232da34`. Angka database dari pengukuran read-only 8 September 2026.
+>
+> ### Yang berbeda dari rancangan di bawah
+>
+> | Rancangan di dokumen ini | Yang benar-benar dikerjakan |
+> |---|---|
+> | `verified_status_raw` **DIHAPUS** dari struktur | **Verified kembali**, tapi dari kolom lain: **`l2_gold.kol_profile_card.is_verified`** · **572 KOL**. Field `verified` + filter `?verified=1` + badge di kartu dan tabel |
+> | `er_pct` dari `kol_directory.engagement_rate` | **`COALESCE(feature.{ig,tt}_engagement_analysis.engagement_rate, kol_directory.engagement_rate)`** — cakupan 1.757 → **1.767**, nol KOL hilang |
+> | `display_name` / `bio_l2` di **Kelompok B** (harus dikumpulkan) | Dipakai **di baris utama** lewat LATERAL yang sudah ada untuk growth: `COALESCE(L2, roster)` untuk avatar, bio, display name. Tidak perlu query terpisah |
+> | Satu **query tersimpan** `discovery.kol_filter_base` | **Tidak dibuat.** Yang ada: satu konstanta `BASE` di `kolDirectory.ts` yang dipakai bersama oleh list dan detail, plus `attachRosterExtras()` untuk agency + rate card **sesudah paging**. Tujuannya sama (satu definisi), bentuknya beda (kode, bukan view database) |
+> | `format_dominant` = **tampilan saja**, bukan filter | **Benar, dan sudah ada** — `gold.dominantFormat` di halaman detail, diturunkan dari `content_format_daily` (56 akun), tanpa query kedua |
+> | Kolom Last Updated hanya dicatat | **Jadi filter** — `?updatedWithin=<hari>` dan sort `recent` |
+> | Agency tidak ada di struktur sama sekali | **Ada** — field `agency`, filter `?agency=`, facet ber-count. 7.684 dari 7.718 |
+> | Heatmap tidak disebut | **Ada di endpoint detail** — `gold.heatmap` dari `feature.{ig,tt}_engagement_analysis.best_posting_time_heatmap`, **50 akun**. Tidak lewat L2: `l2_gold` tidak punya tabel untuk ini |
+>
+> ### Satu kolom pengaman baru yang tidak ada di rancangan
+>
+> Rancangan menyebut empat kolom pengaman (`social_account_n`, `known_gender_ratio`,
+> `post_sample_n`, `er_is_outlier`). Implementasi menambah pengaman kelima, di layer
+> yang berbeda: **sanity guard followers di `sp_build_unified_profile()`**
+> (migration 035, sudah diterapkan).
+>
+> Alasannya ditemukan sesudah dokumen ini ditulis: `l2_gold.kol_profile_card.followers_count`
+> berbeda dari roster untuk **1.024 dari 1.972** akun, dan **54** di antaranya karena
+> scrape TikTok rusak — `zeejkt48` tercatat **17 follower**. Nilai seperti itu bukan
+> sekadar salah di layar; ia menjadi **penyebut growth berikutnya** dan menghasilkan
+> +26.470.588%. Guard tiga lapis (`AMBANG_DASAR` 1.000, `RASIO_RUNTUH` 0,10) meng-NULL-kan
+> **51 baris**, nol di antaranya ber-acuan di bawah 1.000 — jadi 304 KOL yang memang
+> berfollower kecil tidak tersentuh. Rumus Growth tidak berubah.
+>
+> ### §9 "Yang tidak perlu dibuat" — tetap berlaku, dengan satu koreksi
+>
+> Baris *"Tabel campaign baru — 14 tabel sudah ada, yang kurang datanya"* masih benar.
+> Tapi **rate card perlu dibaca ulang**: §8 menulisnya sebagai "adopsi produk". Yang
+> sebenarnya terjadi — sumbernya **sudah ada di database**: `l0_raw.kol_roster_import`
+> 7.718 baris / 7.496 KOL dengan 7 kolom harga terisi, dan procedure
+> `sp_sync_roster_rate_card()` + `sp_build_unified_rate_card()` juga sudah ada.
+> `l1_silver.unified_rate_card` masih 0 baris **karena tidak ada asset Dagster yang
+> memanggilnya**. Ini pekerjaan teknis kecil, bukan adopsi produk.
+>
+> ### §10 "Dua hal yang masih terbuka" — statusnya sekarang
+>
+> * **Chip yang selalu kosong** (Connected, Story, YouTube) — belum diputuskan.
+>   Tapi Connected sekarang punya pasangan: chip **Verified** yang mengembalikan 572,
+>   sehingga sumbu "keterpercayaan" tidak lagi selalu kosong.
+> * **277 username kembar** — **belum dibersihkan**. Dampaknya ke paging sudah ditutup:
+>   tie-break urutan sekarang berakhir di `id` yang unik (7.721 baris aktif hanya punya
+>   7.224 username), jadi dua halaman tidak lagi bisa mengulang satu creator sambil
+>   menjatuhkan yang lain. Dampaknya ke **hitungan hasil filter** masih terbuka.
+>
+> ### Yang masih persis seperti dirancang
+>
+> Tier (ambang dari `public.kol_tiers`, P-01 & P-02 tertutup) · Connected
+> (`platform_user_id` + `oauth_token`, 0 KOL) · Growth (`followers_growth`, 25 KOL,
+> label **"Sejak Snapshot Terakhir"**, preset bukan slider) · format konten sebagai
+> **daftar** dan `media_type` **tidak** diterjemahkan ke kosakata prototype ·
+> Profiling Status tetap dikeluarkan dari rencana · Collections tetap satu-satunya
+> tabel baru yang perlu dibuat, dan **belum dibuat**.
+>
+> Pemetaan lengkap tabel → endpoint → filter → UI ada di `docs/BACKEND_PLAN.md`.
+
+---
 
 > **STATUS 2026-09-07 — sudah diimplementasikan dan diverifikasi.**
 >
@@ -61,11 +130,11 @@ Tidak perlu dijumlahkan atau dirata-rata dulu.
 | `bio` | teks | `kol_directory.bio` | 902 · 11,7% | Cari nama |
 | `followers_count` | angka | `kol_directory.followers_count` | 7.498 · 97,1% | **Tier** (sumber resmi) · Minimum follower |
 | `tier` | teks | **dihitung** dari `followers_count` | ikut kolom di atas | Tier |
-| `er_pct` | angka | `kol_directory.engagement_rate` | 1.756 · 22,7% | Engagement rate |
+| `er_pct` | angka | **2026-09-09:** `COALESCE(feature.{ig,tt}_engagement_analysis.engagement_rate, kol_directory.engagement_rate)` | **1.767** · 22,9% | Engagement rate |
 | `er_is_outlier` | ya/tidak | **dihitung**: `er_pct > 10` | 83 baris | penanda nilai mustahil |
 | `platform_key` | teks | `platforms.key` | 7.496 · 97,1% | Platform |
 | `discovery_category[]` | daftar teks | `kol_categories.taxonomy_key` lewat `category_ids` | **4.155 · 53,82%** | **Kategori** |
-| ~~`verified_status_raw`~~ | ~~teks~~ | ~~`kol_directory.verified_status`~~ | ~~931 · 12,1%~~ | **DIHAPUS 2026-09-07** — Verified tidak lagi jadi field Discovery |
+| `verified` | ya/tidak | **`l2_gold.kol_profile_card.is_verified`** lewat `kol_social_account` | **572** | **Verified** — DIHAPUS 2026-09-07, **DIKEMBALIKAN 2026-09-09** dengan sumber baru (bukan `kol_directory.verified_status`) |
 | `growth_pct` | angka (persen) | `l2_gold.kol_profile_card.followers_growth` lewat `kol_social_account` | 25 · 0,32% | **Growth — sejak snapshot terakhir, bukan 30 hari** |
 | `creator_city` | teks | `kol_directory.creator_city` | 0 · 0% | Kota kreator (belum bisa dipakai) |
 | `last_refreshed_at` | tanggal | `kol_directory.last_refreshed_at` | 7.496 · 97,1% — **artinya cacat** | Last Updated |

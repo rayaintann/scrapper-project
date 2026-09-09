@@ -36,6 +36,25 @@
 > Detail di **§Revisi 2026-09-07** di akhir dokumen. Kalau bertentangan dengan §1–§6
 > maupun dengan revisi 2026-09-06, **section terbaru yang berlaku**.
 
+> ### Revisi ketiga — 2026-09-09 (implementasi lanjutan)
+>
+> Sejak revisi kedua, **sembilan** hal berubah lagi — termasuk satu keputusan yang
+> dibalik:
+>
+> 1. **Verified kembali ke Discovery** dengan sumber baru
+>    (`l2_gold.kol_profile_card.is_verified`, **572 KOL**), terpisah tegas dari Connected.
+> 2. **ER memakai `feature.*_engagement_analysis` lebih dulu** — cakupan 1.757 → **1.767**.
+> 3. **Kategori disaring lewat `taxonomy_key`**, dan chip-nya jadi **15**.
+> 4. **Followers punya dua nilai** (roster vs L2, beda di 1.024 akun); migration 035
+>    memasang **sanity guard**.
+> 5. **Rate card bukan "tanpa source"** — source dan procedure-nya ada, asset-nya tidak.
+> 6. **Last Updated dan Agency jadi filter yang jalan.**
+> 7. **Identitas dibaca dari L2** — avatar 931 → 1.979, bio 902 → 1.878, display name 0 → 1.961.
+> 8. **`SCRAPED_FIRST` dibuang**, tie-break berakhir di `id`.
+> 9. **Dominant format & heatmap jam posting** naik ke endpoint detail.
+>
+> Detail di **§Revisi 2026-09-09** di akhir dokumen — **section itu yang paling berlaku**.
+
 ---
 
 ## 1. Scope & Denominator
@@ -1052,3 +1071,252 @@ sejak 2026-08-28, jadi selama itu angka 25 tidak akan bergerak.
 
 Semua angka di section ini dihitung ulang lewat query read-only ke database `kol`
 pada 2026-09-07, setelah migration 033 dan 034 diterapkan dan pipeline dijalankan ulang.
+
+---
+
+# Revisi — 2026-09-09 (implementasi lanjutan)
+
+Sumber: `scrapper-project` @ `fa3af27` (migration 035, `gold_profile.py`, 354 test lulus) ·
+`autometric` @ `232da34` (`npx tsc --noEmit` exit 0) · pengukuran read-only database `kol`
+8 September 2026 yang terekam di `AUTOME_2_FULL_TRACE_AUDIT.md`,
+`AUTOME_2_DEVELOPMENT_AUDIT.md`, `AUTOME_2_FULL_ENDPOINT_COVERAGE_AUDIT.md`.
+
+> Kalau bertentangan dengan §1–§6, revisi 2026-09-06, maupun revisi 2026-09-07,
+> **section ini yang berlaku**. Section-section lama sengaja tidak dihapus — dipakai
+> sebagai audit trail.
+
+## J1 — Verified: dari MISSING, ke "dihapus", ke **jalan dengan 572 KOL**
+
+Revisi I3 menulis Verified **dihapus dari scope**. Itu sudah tidak berlaku.
+
+Yang berubah bukan cuma keputusan, tapi **sumbernya** — dan itu yang membuat angkanya
+berbeda dari semua versi sebelumnya:
+
+| Versi | Sumber | Terisi | Status |
+|---|---|---:|---|
+| §2 No. 5 (Task 3 asli) | `social_account.oauth_token` | **0** | MISSING — ini sebenarnya **Connected**, bukan Verified |
+| Task 2 / Task 4 | `kol_directory.verified_status` | 454 | ditolak, lalu dihapus |
+| **Sekarang** | **`l2_gold.kol_profile_card.is_verified`** | **572** | **PARTIAL — dipakai** |
+
+Sumber 572 itu badge platform asli yang selama ini ada di L0 tapi tidak pernah diekstrak:
+
+| Platform | Kolom L0 | Baris | Bertanda true |
+|---|---|---:|---:|
+| Instagram | `l0_raw.ig_profile_apify.raw_payload->>'verified'` | 953 | **470** |
+| TikTok | `l0_harmonization.tiktok_profile.is_verified` | 1.058 | **124** |
+
+Sebelum `fa3af27`, `l1_silver.unified_profile.is_verified` justru diisi **ekspresi
+Connected** (sejak migration 031), sehingga 2.010 baris L1 dan 1.979 kartu L2 semuanya
+`false` — badge platform hilang di tengah jalan. `gold_profile.py` keputusan #7 sekarang
+mengambilnya dari sumbernya. Definisi Connected **tidak diubah**.
+
+Connected tetap **0 dari 7.720**, dan itu tetap benar. Karena 572 ≠ 0, keduanya
+dipertahankan sebagai **dua sumbu terpisah** di endpoint (`?verified=1` dan
+`?connected=1`) dengan ikon berbeda.
+
+## J2 — Engagement Rate: dua baris di §2 (No. 14 dan 14b) sekarang satu ekspresi
+
+§2 mencatat dua kandidat ER yang bersaing: `kol_metric_daily.er_followers_daily`
+(22 akun, usable 1) dan `kol_directory.engagement_rate` (1.756, usable 219).
+
+Endpoint yang di-ship **tidak memilih salah satu** — ia memakai kandidat ketiga lebih
+dulu, yaitu metrik yang benar-benar dihitung project ini:
+
+```sql
+COALESCE(
+  feature.{ig,tt}_engagement_analysis.engagement_rate,   -- 38 nilai, rentang 0-16,15%
+  kol_directory.engagement_rate                          -- 1.757 nilai, maks 223,41%
+)
+```
+
+| | Nilai |
+|---|---:|
+| Cakupan sebelum | 1.757 |
+| **Cakupan sesudah** | **1.767** |
+| KOL yang hilang | **0** |
+| Di antaranya yang **hanya** punya nilai feature | 10 |
+
+Feature dipilih lebih dulu karena penyebutnya follower **pada tanggal post**, dan post
+kolaborasi serta likes-hidden dikecualikan (`feature_engagement.py`) — aturan sampel yang
+sudah terbukti menyelamatkan 43 baris salah-atribusi dari mencemari ER.
+
+**Yang belum diputuskan tetap belum diputuskan:** memindahkan ER sepenuhnya ke L2
+(`er_followers_daily`) akan memangkas cakupan filter dari 1.756 menjadi 22 KOL. Keputusan
+itu sengaja ditunda sampai cakupan post naik.
+
+## J3 — Kategori: filter akhirnya memakai `taxonomy_key`, dan chip-nya 15
+
+§2 No. 2 sudah menulis sumbernya `taxonomy_key`. Yang tidak terlihat di dokumen ini:
+**endpoint aplikasi selama ini menyaring pakai `kol_categories.name`**, bukan
+`taxonomy_key` — jadi dua implementasi (`db.py` di repo ini dan `kolDirectory.ts`)
+menjawab pertanyaan yang sama dengan hasil berbeda.
+
+| Chip | Jawaban lama (`name`) | Jawaban benar (`taxonomy_key`) |
+|---|---:|---:|
+| Food | 57 | **123** |
+| Dance → Entertainment | 3 | **501** |
+
+Sejak `232da34` keduanya memakai `COALESCE(taxonomy_key, name)`, di filter **dan** di
+facet, sehingga hitungan chip sama persis dengan panjang hasil filter.
+
+Konsekuensi yang perlu dicatat: **chip-nya 15, bukan 9.** 6 dari 28 nama kategori mentah
+belum punya `taxonomy_key`, dan `COALESCE` membuat mereka muncul apa adanya. Tanpa itu,
+6 kategori tersebut beserta 20 KOL yang memakainya tidak akan terjangkau chip mana pun.
+Nama sub-kategori tetap diterima sebagai nilai filter supaya link lama tidak mati.
+
+## J4 — Followers: satu kolom, dua nilai, dan sanity guard yang menutup risikonya
+
+Dokumen ini mengukur `followers_count` sebagai satu angka (7.498 · 97,1%). Pengukuran
+8 September menemukan bahwa ada **dua** nilai yang hidup bersamaan:
+
+| | Akun |
+|---|---:|
+| Punya followers di roster **dan** L2 | 1.972 |
+| Sama persis | 948 |
+| **Berbeda** | **1.024 (52%)** |
+| Rata-rata selisih | 252.320 |
+
+Dua penyebab yang berlawanan, jadi tidak ada satu pun sumber yang benar untuk semuanya:
+
+| # | Penyebab | Akun | Yang benar |
+|---|---|---:|---|
+| 1 | Roster basi — tidak pernah di-refresh sejak 2023–2024 | ~970 | **L2** |
+| 2 | Nilai scrape TikTok rusak (0/9/17 untuk akun berjuta follower) | **54** | **roster** |
+
+Bukti arahnya konsisten: `last_refreshed_at` **selalu** lebih tua dari
+`profile_snapshot_date` — 1.024 dari 1.024, nol pengecualian. Dan saat keduanya sama-sama
+segar (912 akun di-refresh 2026-08-14), selisihnya **nol**.
+
+Bahaya sebenarnya bukan angka di layar, melainkan angka itu menjadi **penyebut growth
+berikutnya**: `zeejkt48` 4.500.000 → 17 → 4.500.000 akan menghasilkan −99,9996% lalu
+**+26.470.588%**.
+
+**Migration 035 (sudah diterapkan) memasang sanity guard tiga lapis** di
+`sp_build_unified_profile()`, dengan `AMBANG_DASAR = 1.000` dan `RASIO_RUNTUH = 0,10`:
+
+1. `followers < 0` → NULL
+2. acuan = snapshot valid sebelumnya, atau roster; acuan ≥ 1.000 **dan** nilai < acuan × 0,10 → NULL
+3. tanpa acuan sama sekali, TikTok, < 1.000, `likes = 0` **dan** `video = 0` → NULL
+
+Ambang diterapkan pada **acuan**, bukan pada nilai baru, sehingga **304 KOL yang memang
+berfollower di bawah 1.000 tidak pernah tersentuh**. Terukur: **51 baris menjadi NULL**,
+nol di antaranya ber-acuan di bawah 1.000. Rumus Growth **tidak berubah satu karakter pun**;
+yang ditambah cuma pembanding dua tahap supaya snapshot yang di-NULL-kan dilewati, bukan
+memutus riwayat. `l0_raw` dan `l0_harmonization` tidak disentuh.
+
+**Sumber resmi Followers tetap `kol_directory.followers_count` (P-02).** Konsekuensinya
+diakui apa adanya: UI menampilkan follower roster sementara `growthPct` dihitung dari
+follower L2, jadi kedua angka itu **belum bisa direkonsiliasi**. Itu keputusan terbuka,
+bukan bug yang sudah ditutup.
+
+## J5 — Rate card: bukan "tidak ada source", tapi "procedure tidak dipanggil"
+
+§Ringkasan dan Task 2 mencatat rate card sebagai tabel kosong tanpa sumber. Pengukuran
+8 September membalik pembacaan itu:
+
+| Bukti | Hasil |
+|---|---|
+| `l0_raw.kol_roster_import` | **7.718 baris · 7.496 KOL distinct** |
+| 7 kolom harga (`story_price`, `feed_photo_price`, `reel_price`, dst.) | **terisi untuk 7.496 KOL** |
+| `l0_harmonization.sp_sync_roster_rate_card()` | **ada**, lengkap |
+| `l1_silver.sp_build_unified_rate_card()` | **ada** |
+| `l1_silver.unified_rate_card` | **0 baris** |
+
+Penyebabnya: `orchestration/.../harmonization.py` sengaja tidak membuatkan asset untuk
+rate card, dengan alasan *"tabel `l0_raw` sumbernya 0 baris"*. Alasan itu benar untuk
+`l0_extra.ig/tt_rate_card`, tapi **tidak berlaku** untuk `kol_roster_import`.
+
+**Dampak yang sudah terukur ke pengguna:** filter `?maxRate=` aktif di endpoint dan
+memakai `EXISTS (… fee IS NOT NULL AND fee <= $)`. Karena tabelnya kosong, **0 dari 7.720
+KOL lolos** — begitu slider digeser dari maksimum, direktori jadi kosong total. Ini
+filter yang bekerja dengan benar di atas tabel kosong, bukan filter yang belum dibuat.
+
+> **Catatan dokumentasi:** angka "9.210 baris / 7.230 akun" yang muncul di
+> `docs/L0_L1_L2_FLOW.md` (tabel L1) dan di docstring `kolMeasured.ts` / `gold_profile.py`
+> **tidak akurat** — itu hasil yang *akan* dihasilkan procedure, bukan isi tabel sekarang.
+> Sudah dikoreksi di `AUTOME_2_DEVELOPMENT_AUDIT.md` §K-1.
+
+## J6 — Filter yang naik status tanpa penambahan data
+
+Tiga hal berikut tidak butuh scraping baru; datanya sudah ada dan cuma belum dipakai.
+
+| Filter / field | Status di §2 | Status 2026-09-09 | Sumber |
+|---|---|---|---|
+| **Last Updated** | tidak ada di daftar 32 | **jalan** — `?updatedWithin=<hari>` + sort `recent` | `kol_directory.last_refreshed_at` (7.496) |
+| **Agency** | tidak pernah dicek | **jalan** — `?agency=<nama>` + facet ber-count | `agency_kol_accounts` + `agencies` (**7.684 / 7.718**) |
+| **Identitas (avatar, bio, display name)** | diukur dari roster | **dibaca dari L2 lebih dulu** | avatar 931 → **1.979** · bio 902 → **1.878** · display name 0 → **1.961** |
+
+L2 terbukti **superset ketat** roster untuk avatar dan bio: nol kasus di mana roster punya
+nilai tapi L2 tidak. Endpoint memakai `COALESCE(L2, roster)` — bukan penggantian — supaya
+baris roster yang lebih dulu terisi tidak pernah mundur.
+
+## J7 — Sorting: 27 KOL yang selalu di puncak sudah tidak ada
+
+Tidak tercatat di dokumen ini, tapi memengaruhi **semua** hasil filter: kunci urutan
+`SCRAPED_FIRST` mendahului pilihan user, sehingga 28 creator ber-`status` Live/Calculated
+selalu di baris atas apa pun sort-nya — `bobbykertanegara` (948.683) mengalahkan
+`cristiano` (679.264.838) saat diurut followers menurun, dan tetap di atas `sekata_ai`
+(200) saat menaik.
+
+Kunci itu dibuang di `232da34`. Kolom `status` tetap dikembalikan dan tetap digambar
+sebagai chip. Tie-break sekarang berakhir di `id` (unik) karena **username tidak unik**:
+7.721 baris aktif hanya punya 7.224 username berbeda — tanpa kunci unik, sampai 497 baris
+berada dalam urutan yang bebas diubah planner, dan dua halaman bisa mengulang satu
+creator sambil menjatuhkan yang lain.
+
+Ini menjawab §5.2 (277 grup username duplikat) dari sisi paging: **duplikatnya belum
+dibersihkan**, tapi paging-nya tidak lagi goyah karenanya.
+
+## J8 — Content Format & Heatmap: naik ke endpoint, tanpa tabel baru
+
+| Fitur | Sumber | Cakupan | Di mana |
+|---|---|---:|---|
+| **Dominant format** | diturunkan dari `l2_gold.content_format_daily` yang sudah ada | **56 akun** | `gold.dominantFormat` di halaman detail |
+| **Heatmap jam posting** | `feature.{ig,tt}_engagement_analysis.best_posting_time_heatmap` | **50 akun** | `gold.heatmap` di halaman detail |
+
+Dua catatan penting:
+
+* `media_type` **tidak** dipetakan ke kosakata prototype (Reels/Feed/Carousel). Pemetaan
+  itu tidak terdefinisi di mana pun, dan mengarangnya berarti menaruh label di layar yang
+  tidak didukung data. Nilainya dibawa apa adanya: `clips`, `carousel_container`, `feed`,
+  `VIDEO`, `CAROUSEL`, `unknown`.
+* Heatmap dibaca **langsung dari layer Feature**, bukan L2 — karena `l2_gold` di database
+  `kol` hanya punya 8 tabel dan `posting_time_heatmap` bukan salah satunya. Menambahkannya
+  berarti migration. `dow`/`hour` sudah Asia/Jakarta dan **tidak boleh digeser lagi**.
+
+Ini juga membatalkan pernyataan di `docs/L0_L1_L2_FLOW.md` §Feature Layer bahwa *"tidak
+satu pun tabel feature dibaca langsung oleh UI"* — sejak `232da34`, dua kolom feature
+(`engagement_rate` dan `best_posting_time_heatmap`) dibaca endpoint.
+
+## J9 — Yang **tidak** berubah, dan kenapa
+
+| Filter | Status | Penghambat sebenarnya |
+|---|---|---|
+| Growth 30D · Rising Creator · Stability · Viral Frequency · Momentum | **tetap DERIVED — INCOMPLETE** | Butuh snapshot berjarak ≥30 hari. **0 akun punya 3 snapshot.** Scraping berhenti sejak 2026-08-28, jadi angka 25 tidak bergerak. Paling cepat awal Oktober kalau scheduler mulai minggu ini |
+| Riwayat follower (time-series) | **tidak ada** | Gudang menyimpan paling banyak **2 snapshot per akun**. Kurva enam bulan di halaman detail masih model, bukan data |
+| Gender · Lokasi · Minat · Kualitas audiens | **tetap PARTIAL, dan tetap tanpa filter di listing** | 23 KOL. Sudah tampil di halaman detail, tapi tidak ada filter backend-nya |
+| Avg/Median Views · Posting Frequency · Paid Ratio · V2F · L2V | **CALCULATION MISSING** | Bahannya ada di L2 mentah (`post_metric`, `kol_metric_daily/_monthly`), agregatnya belum pernah dihitung |
+| Authenticity · Audience Quality | **CALCULATION MISSING** | Skornya ada di `feature.{ig,tt}_audience_analysis` (23 KOL), belum diekspos endpoint |
+| Save/Share rate | **tetap MISSING untuk Instagram** | `post_metric.saves`/`shares` 0 dari 186 baris IG; TikTok 291 baris punya |
+| Reach · Impressions · Watch time · Umur audiens | **tetap MISSING** | Butuh Insights API — lead time eksternal, bukan pekerjaan kode |
+| Profiling Status · Data Status · Update Frequency · Next Update · Monitoring Priority | **tetap MISSING** | `refresh_tier` 0 · `scheduler_config` 0 baris. Keputusan jadwal belum diambil |
+| Creator city | **tetap MISSING** | 0 dari 7.720 |
+| Reliability · Content Topic · Content Style · Sentiment | **tetap MISSING** | Sentiment & content topic punya raw di L0 tapi belum ada asset; sisanya tidak punya kolom |
+| Collections / shortlist | **tetap tidak ada tabelnya** | Daftar tersimpan di halaman Discovery masih state klien, bukan tabel database |
+| 277 grup username duplikat | **belum dibersihkan** | Dampaknya ke paging sudah ditutup (J7); dampaknya ke hitungan hasil filter **belum** |
+
+## Verifikasi yang benar-benar dijalankan
+
+| Apa | Hasil |
+|---|---|
+| `pytest` di `scrapper-project` | **354 lulus**, 40 di antaranya `tests/test_followers_guard.py` (baru) |
+| `npx tsc --noEmit` di `autometric` | **exit 0** |
+| Baseline baris roster sesudah semua perubahan endpoint | **7.721**, nol duplikat, nol KOL hilang |
+| Badge verified L2 vs sumber L0 | **0 beda** |
+| Sanity guard followers | **51 baris → NULL**, 0 di antaranya ber-acuan < 1.000 |
+| Pengukuran database | read-only, `set_session(readonly=True)`, 8 September 2026 |
+
+Tidak ada scraping baru dan tidak ada perubahan schema tabel pada perubahan 8–9 September.
+Satu-satunya penulisan data adalah migration 035, yang mengganti definisi
+`sp_build_unified_profile()` sehingga kolom `followers_count` di L1 dibangun ulang dengan
+guard — bukan `DELETE`/`UPDATE` manual atas data.
