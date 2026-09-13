@@ -93,6 +93,7 @@ from kol_orchestration.assets.gold_post import gold_post_assets
 from kol_orchestration.assets.gold_profile import gold_profile_assets
 from kol_orchestration.assets.followers import follower_assets
 from kol_orchestration.assets.audience import audience_assets
+from kol_orchestration.assets.creator_age import creator_age_assets
 from kol_orchestration.one_shot import one_shot_jobs, one_shot_schedules
 from kol_orchestration.sensors import l0_raw_sensors
 
@@ -143,7 +144,8 @@ defs = Definitions(
         *gold_post_assets,           # l2_gold: per konten + per format (SCRUM-515/517)
         *gold_profile_assets,        # l2_gold: kartu profil per KOL (SCRUM-514)
         *follower_assets,            # l0_harm + l1: rantai daftar follower
-        *audience_assets,            # feature + l2_gold: audiens hasil inferensi
+        *audience_assets,            # feature + l2_gold: audiens (inferensi + umur terukur)
+        *creator_age_assets,         # l2_gold: umur KREATOR di kartu profil (bukan audiens)
     ],
     jobs=one_shot_jobs,
     # Sengaja kosong: tidak ada schedule/cron apa pun di project ini.
