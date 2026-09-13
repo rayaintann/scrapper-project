@@ -1,0 +1,519 @@
+"""What Matters Most — 7 kriteria ranking, SATU definisi, dua bentuk.
+
+============================================================================
+APA INI
+============================================================================
+
+Tujuh kriteria preferensi user di Discovery. User memilih beberapa, sistem
+merata-ratakan skor kriteria yang dipilih, lalu meranking.
+
+Seluruh skor 0..100. Semua dihitung SAAT DIBACA -- tidak ada kolom baru, tidak
+ada tabel baru, tidak ada nilai yang disimpan. Alasannya di bagian terakhir.
+
+Pola dan alasannya sama dengan `metrics_thresholds.py` dan
+`campaign_cost_metrics.py`: definisi hidup sekali di sini, lalu diturunkan ke
+fungsi Python dan ekspresi SQL yang digenerate dari konstanta yang sama.
+
+============================================================================
+DUA JENIS SKOR, DAN KENAPA DIBEDAKAN
+============================================================================
+
+    REAL     dihitung dari metric yang memang mengukur hal itu
+    PROXY    dihitung dari metric LAIN karena yang sebenarnya tidak ada
+
+Perbedaan itu bukan basa-basi. `reach_proxy_score` dihitung dari VIEWS, dan
+views bukan reach -- satu penayangan berulang dari orang yang sama dihitung
+dua kali, sementara reach menghitung akun unik. Menampilkannya sebagai "reach"
+tanpa kualifikasi akan membuat orang mengambil keputusan beli berdasarkan
+angka yang bukan yang mereka kira.
+
+`SIFAT` di bawah merekamnya per kriteria, dan API wajib meneruskannya.
+
+============================================================================
+DUA KRITERIA SENGAJA MENGEMBALIKAN NULL
+============================================================================
+
+`content_quality` dan `brand_safety` TIDAK dihitung. Bukan karena lupa.
+
+CONTENT QUALITY. Bobot yang diusulkan: engagement 40%, content format 30%,
+content topic 30%. Audit atas data nyata:
+
+    format_dominant   Carousel 24 . Video 20 . Image 5
+    content_topic     11 topik dari caption + 2 dari fallback kategori
+
+Tidak ada satu pun sumber -- di DB, Excel, maupun prototype -- yang menyatakan
+Carousel lebih berkualitas daripada Image, atau topik `food` lebih berkualitas
+daripada `religion`. Memberi keduanya skor berarti mengarang penilaian, dan
+memberi skor hanya karena kolomnya terisi persis yang dilarang.
+
+Yang tersisa cuma engagement 40% -- dan itu sudah menjadi kriteria #1. Memakai
+ulang sinyal yang sama dengan nama lain akan membuatnya dihitung dua kali di
+rata-rata What Matters. Jadi NULL, bukan angka setengah jadi.
+
+BRAND SAFETY. Bobot yang diusulkan: authenticity 50%, topic safety 30%, data
+quality 20%. Audit:
+
+    authenticity     ADA -- feature.*_audience_analysis.authenticity_score
+    topic safety     TIDAK ADA -- tidak ada taksonomi aman/tidak aman untuk
+                     ke-11 topik; `*_comments_analysis` (toxicity, sentiment)
+                     0 baris
+    data quality     TIDAK ADA definisinya sebagai komponen brand safety
+
+Setengah bobotnya tanpa sumber. Kalau sisanya dinormalisasi, hasilnya persis
+sama dengan `authenticity_score` -- satu angka, dua nama, dan yang kedua
+menjanjikan jaminan keamanan merek yang tidak diberikannya.
+
+Keduanya tetap terdaftar di `KRITERIA` supaya UI bisa menampilkannya
+NONAKTIF beserta alasannya, bukan menyembunyikannya.
+
+============================================================================
+KENAPA TIDAK ADA KOLOM, TABEL, ATAU VIEW BARU
+============================================================================
+
+Kolom  Seluruh skor di sini turunan murni kolom yang sudah ada. Menyimpannya
+       berarti wajib menjaganya sinkron tiap kali sumbernya berubah. Dan
+       `tests/test_calculated_metrics.py` memang melarang calculated metric
+       baru di `l2_gold.kol_profile_card`.
+
+Tabel  Tidak ada yang perlu disimpan. Preferensi user dikirim per-request,
+       dan produk ini belum pernah mempersist pilihan user jenis apa pun.
+
+View   Database `kol` sekarang punya NOL view. Memperkenalkan yang pertama
+       adalah keputusan konvensi tim, bukan keputusan task ini.
+"""
+
+from __future__ import annotations
+
+# ===========================================================================
+# SIFAT SKOR
+# ===========================================================================
+REAL = "real"
+PROXY = "proxy"
+TIDAK_TERSEDIA = "tidak_tersedia"
+
+SKALA_MIN = 0.0
+SKALA_MAX = 100.0
+
+
+# ===========================================================================
+# 1. KRITERIA  --  kunci API, nama, sumber, sifat
+# ===========================================================================
+#
+# `kunci` adalah yang dikirim UI:  ?matters=engagement,consistency,brand_safety
+
+KRITERIA: dict[str, dict] = {
+    "engagement": {
+        "nama": "Strong Engagement",
+        "skor": "engagement_score",
+        "sifat": REAL,
+        "sumber": ("public.kol_directory.engagement_rate",),
+        "catatan": "Peringkat persentil ER dalam populasi terukur.",
+    },
+    "audience_quality": {
+        "nama": "High Audience Quality",
+        "skor": "audience_quality_score",
+        "sifat": REAL,
+        "sumber": ("l2_gold.kol_profile_card.audience_quality_score",
+                   "l2_gold.kol_profile_card.authenticity_score"),
+        "catatan": "Rata-rata keduanya; kalau satu NULL, pakai yang ada.",
+    },
+    "consistency": {
+        "nama": "Consistent Performance",
+        "skor": "consistency_score",
+        "sifat": REAL,
+        "sumber": ("l2_gold.kol_profile_card.performance_stability",
+                   "l2_gold.kol_profile_card.post_frequency_reliability"),
+        "catatan": "Dua label ordinal dari metrics_thresholds, bukan k.cons "
+                   "prototype yang merupakan hash creator id.",
+    },
+    "community": {
+        "nama": "Strong Company/Community",
+        "skor": "community_strength_score",
+        "sifat": PROXY,
+        "sumber": ("l2_gold.kol_profile_card.audience_quality_score",
+                   "public.kol_directory.engagement_rate"),
+        "catatan": "PROXY. Bukan ukuran komunitas sebenarnya -- tidak ada "
+                   "kolom community di seluruh DB.",
+    },
+    "reach": {
+        "nama": "High Reach",
+        "skor": "reach_proxy_score",
+        "sifat": PROXY,
+        "sumber": ("l2_gold.kol_profile_card.median_views",),
+        "catatan": "PROXY BERBASIS VIEWS, bukan reach Insights. "
+                   "estimated_reach TIDAK dipakai.",
+    },
+    "content_quality": {
+        "nama": "Content Quality",
+        "skor": "content_quality_score",
+        "sifat": TIDAK_TERSEDIA,
+        "sumber": (),
+        "catatan": "Selalu NULL. format_dominant dan content_topic tidak "
+                   "punya urutan kualitas yang bisa dipertanggungjawabkan.",
+    },
+    "brand_safety": {
+        "nama": "Brand Safety",
+        "skor": "brand_safety_score",
+        "sifat": TIDAK_TERSEDIA,
+        "sumber": (),
+        "catatan": "Selalu NULL. Topic safety dan data quality tidak punya "
+                   "sumber; authenticity sendirian hanya menduplikasi "
+                   "kriteria audience_quality dengan nama yang menyesatkan.",
+    },
+}
+
+#: Urutan tampil di UI.
+URUTAN_KRITERIA = ("engagement", "audience_quality", "consistency",
+                   "community", "reach", "content_quality", "brand_safety")
+
+#: Kriteria yang benar-benar mengembalikan angka hari ini.
+KRITERIA_AKTIF = tuple(k for k in URUTAN_KRITERIA
+                       if KRITERIA[k]["sifat"] != TIDAK_TERSEDIA)
+
+
+# ===========================================================================
+# 2. NORMALISASI
+# ===========================================================================
+
+def klem(nilai: float | None) -> float | None:
+    """Paksa ke 0..100. None tetap None."""
+    if nilai is None:
+        return None
+    return max(SKALA_MIN, min(SKALA_MAX, float(nilai)))
+
+
+def persentil_ke_skor(nilai: float | None,
+                      populasi: list[float] | tuple[float, ...]) -> float | None:
+    """Peringkat persentil `nilai` dalam `populasi`, sebagai 0..100.
+
+    Dipakai untuk metric yang sebarannya sangat miring: ER punya ekor sampai
+    223% dan median_views sampai 136 juta. Normalisasi linear terhadap nilai
+    maksimum akan menempelkan hampir seluruh populasi ke nol.
+
+    Persentil dipilih karena ia TIDAK memerlukan benchmark yang harus
+    dikarang. Ia murni relatif terhadap populasi yang sedang dibandingkan, dan
+    kebal outlier: ER 223% cuma menjadi peringkat teratas, tidak menggeser
+    skala orang lain.
+
+    Populasi yang dipakai adalah yang TERUKUR saja -- NULL tidak ikut, dan
+    tidak diperlakukan sebagai nol.
+    """
+    if nilai is None:
+        return None
+    terukur = [float(x) for x in populasi if x is not None]
+    if not terukur:
+        return None
+    if len(terukur) == 1:
+        return SKALA_MAX if float(nilai) >= terukur[0] else SKALA_MIN
+    # Dibatasi n-1 supaya nilai di LUAR populasi (mis. saat memberi skor satu
+    # kreator terhadap populasi lain) tidak menghasilkan lebih dari 100.
+    lebih_kecil = min(sum(1 for x in terukur if x < float(nilai)),
+                      len(terukur) - 1)
+    return round(lebih_kecil / (len(terukur) - 1) * SKALA_MAX, 4)
+
+
+def _rata_rata_tersedia(*nilai: float | None) -> float | None:
+    """Rata-rata yang mengabaikan None. Semua None -> None.
+
+    NULL bukan nol. Kreator yang belum diukur tidak boleh dihukum seolah
+    hasil pengukurannya buruk.
+    """
+    ada = [float(v) for v in nilai if v is not None]
+    if not ada:
+        return None
+    return sum(ada) / len(ada)
+
+
+# ===========================================================================
+# 3. SKOR ORDINAL  --  label -> angka
+# ===========================================================================
+# Label stabilitas dan reliabilitas datang dari `metrics_thresholds`, yang
+# ambangnya sudah ditetapkan. Yang belum ada adalah cara mengubah label jadi
+# angka.
+#
+# Aturannya deterministik, bukan angka pilihan: posisi ordinal dinormalisasi
+# ke 0..100. Tiga tingkat -> 0 / 50 / 100. Ini URUTAN, bukan pengukuran --
+# "Medium" bukan berarti separuh sebaik "High", hanya berarti di tengah.
+
+TINGKAT_STABILITAS = ("Low Stability", "Medium Stability", "High Stability")
+TINGKAT_RELIABILITAS = ("Low", "Medium", "High")
+
+
+def _ordinal_ke_skor(label: str | None,
+                     tingkat: tuple[str, ...]) -> float | None:
+    if label is None or label not in tingkat:
+        return None
+    return round(tingkat.index(label) / (len(tingkat) - 1) * SKALA_MAX, 4)
+
+
+# ===========================================================================
+# 4. TUJUH SKOR KRITERIA
+# ===========================================================================
+
+def engagement_score(engagement_rate: float | None,
+                     populasi_er: list[float] | tuple[float, ...]) -> float | None:
+    """Kriteria 1 -- REAL.  Peringkat persentil ER."""
+    return persentil_ke_skor(engagement_rate, populasi_er)
+
+
+def audience_quality_score(aq: float | None,
+                           authenticity: float | None) -> float | None:
+    """Kriteria 2 -- REAL.  Rata-rata dua skor yang sudah 0..100.
+
+    Keduanya sudah berskala 0..100 di sumbernya, jadi tidak dinormalisasi
+    ulang -- itu akan menghilangkan artinya. Kalau salah satu NULL, yang
+    tersedia dipakai apa adanya.
+    """
+    return klem(_rata_rata_tersedia(aq, authenticity))
+
+
+def consistency_score(performance_stability: str | None,
+                      post_frequency_reliability: str | None) -> float | None:
+    """Kriteria 3 -- REAL.  Rata-rata dua label ordinal.
+
+    `performance_stability` sudah memperhitungkan arah yang benar: ia berasal
+    dari `er_stddev_pp`, di mana simpangan baku KECIL berarti STABIL, dan
+    `metrics_thresholds.klasifikasi_stability` sudah membalikkannya jadi
+    High/Medium/Low. Memakai labelnya berarti memakai ambang yang sudah
+    ditetapkan, bukan membuat definisi kedua atas angka mentahnya.
+    """
+    return _rata_rata_tersedia(
+        _ordinal_ke_skor(performance_stability, TINGKAT_STABILITAS),
+        _ordinal_ke_skor(post_frequency_reliability, TINGKAT_RELIABILITAS),
+    )
+
+
+# --- bobot community, dan kenapa berbeda dari usulan awal -------------------
+#
+# Usulan awal: audience quality 40% + authenticity 30% + engagement 30%.
+# Audit `audience_inference.py:1102` menemukan:
+#
+#     aq = round((fq + au) / 2)
+#
+# `audience_quality_score` HARFIAH rata-rata `follower_quality_score` dan
+# `authenticity_score`. Diverifikasi atas data nyata: 21 dari 27 baris cocok
+# persis, 6 sisanya beda satu poin karena pembulatan.
+#
+# Jadi bobot usulan akan memberi authenticity 0,40x0,50 + 0,30 = 50% efektif,
+# sementara follower quality cuma 20% -- authenticity dihitung dua kali.
+#
+# Perbaikannya: pakai `audience_quality_score` saja, yang sudah membawa
+# keduanya dengan bobot setara.
+BOBOT_COMMUNITY_KUALITAS = 0.70
+BOBOT_COMMUNITY_ER = 0.30
+
+
+def community_strength_score(aq: float | None,
+                             engagement_rate: float | None,
+                             populasi_er: list[float] | tuple[float, ...]
+                             ) -> float | None:
+    """Kriteria 4 -- PROXY.  Kualitas audiens 70% + engagement 30%.
+
+    BUKAN ukuran komunitas. Tidak ada kolom community di seluruh 101 tabel.
+    Ini gabungan dua sinyal yang ADA dan secara masuk akal berkorelasi dengan
+    audiens yang hidup: audiens yang asli, dan audiens yang berinteraksi.
+    """
+    er_skor = persentil_ke_skor(engagement_rate, populasi_er)
+    aq_klem = klem(aq)
+    if aq_klem is None and er_skor is None:
+        return None
+    if aq_klem is None:
+        return er_skor
+    if er_skor is None:
+        return aq_klem
+    return aq_klem * BOBOT_COMMUNITY_KUALITAS + er_skor * BOBOT_COMMUNITY_ER
+
+
+def reach_proxy_score(median_views: float | None,
+                      populasi_views: list[float] | tuple[float, ...]
+                      ) -> float | None:
+    """Kriteria 5 -- PROXY BERBASIS VIEWS.
+
+    `median_views` dipilih di atas `avg_views`: keduanya berkorelasi 0,957,
+    tapi rata-rata tertarik post viral (p50 638 ribu vs median 345 ribu),
+    sehingga akun dengan satu post meledak akan naik melewati akun yang
+    konsisten.
+
+    `l0_raw.kol_roster_import.estimated_reach` TIDAK dipakai sebagai fallback:
+    2.164 barisnya punya reach lebih besar daripada jumlah follower -- indikasi
+    pergeseran kolom CSV.
+
+    Reach kanonik tetap Instagram/TikTok Insights. Seluruh tabel `*_official`
+    saat ini 0 baris dan tidak ada satu pun akun yang tersambung OAuth.
+    """
+    return persentil_ke_skor(median_views, populasi_views)
+
+
+def content_quality_score(*_args, **_kwargs) -> None:
+    """Kriteria 6 -- TIDAK TERSEDIA. Selalu None. Lihat docstring modul."""
+    return None
+
+
+def brand_safety_score(*_args, **_kwargs) -> None:
+    """Kriteria 7 -- TIDAK TERSEDIA. Selalu None. Lihat docstring modul."""
+    return None
+
+
+# ===========================================================================
+# 5. WHAT MATTERS SCORE
+# ===========================================================================
+
+def what_matters_score(skor: dict[str, float | None],
+                       dipilih: list[str] | tuple[str, ...]) -> float | None:
+    """Rata-rata skor kriteria yang DIPILIH dan PUNYA NILAI.
+
+    Kriteria yang dipilih tapi nilainya NULL dikeluarkan dari penyebut, bukan
+    dihitung nol. Kreator tidak boleh turun peringkat karena datanya memang
+    belum ada.
+
+    Seluruh kriteria terpilih NULL -> None, dan di ranking ia jatuh ke bawah
+    lewat NULLS LAST -- bukan lewat skor nol yang akan menyamakannya dengan
+    kreator yang benar-benar buruk.
+    """
+    if not dipilih:
+        return None
+    ada = [skor[k] for k in dipilih if skor.get(k) is not None]
+    if not ada:
+        return None
+    return sum(ada) / len(ada)
+
+
+def parse_matters(param: str | None) -> list[str]:
+    """`"engagement,consistency,brand_safety"` -> daftar kunci yang sah.
+
+    Kunci tak dikenal diabaikan, bukan membuat request gagal: UI yang lebih
+    baru boleh mengirim kriteria yang backend ini belum kenal.
+    """
+    if not param:
+        return []
+    hasil = []
+    for bagian in param.split(","):
+        kunci = bagian.strip().lower()
+        if kunci in KRITERIA and kunci not in hasil:
+            hasil.append(kunci)
+    return hasil
+
+
+# ===========================================================================
+# 6. BENTUK KEDUA: SQL
+# ===========================================================================
+# Persentil di SQL memakai `percent_rank()`, yang definisinya identik dengan
+# `persentil_ke_skor`: (jumlah baris yang nilainya lebih kecil) / (n - 1).
+# Baris NULL otomatis keluar dari jendela, jadi tidak perlu filter tambahan.
+
+def sql_ordinal(kolom: str, tingkat: tuple[str, ...]) -> str:
+    bagian = "\n".join(
+        f"        WHEN {kolom} = '{label}' THEN {round(i / (len(tingkat)-1) * SKALA_MAX, 4)}"
+        for i, label in enumerate(tingkat))
+    return f"CASE\n{bagian}\n        ELSE NULL\n    END"
+
+
+def sql_persentil(kolom: str) -> str:
+    """0..100 atas populasi TERUKUR saja. NULL tetap NULL.
+
+    `PARTITION BY ({kolom} IS NULL)` bukan hiasan — tanpanya, baris NULL ikut
+    masuk penyebut `percent_rank()` dan seluruh skor mengecil sebanding
+    coverage. Dengan ER yang cuma terisi 23%, kreator ber-ER tertinggi di
+    seluruh direktori mendapat 23 alih-alih 100.
+
+    Partisi memisahkan baris NULL ke kelompoknya sendiri, jadi peringkat di
+    kelompok non-NULL dihitung hanya terhadap sesama non-NULL — sepadan dengan
+    `persentil_ke_skor()`, yang juga membuang None dari populasi.
+    """
+    return (f"CASE WHEN {kolom} IS NULL THEN NULL "
+            f"ELSE percent_rank() OVER "
+            f"(PARTITION BY ({kolom} IS NULL) ORDER BY {kolom}) * {SKALA_MAX} "
+            f"END")
+
+
+def sql_rata_rata_tersedia(*ekspresi: str) -> str:
+    """Rata-rata yang mengabaikan NULL; semua NULL -> NULL."""
+    pembilang = " + ".join(f"COALESCE({e}, 0)" for e in ekspresi)
+    penyebut = " + ".join(f"(CASE WHEN {e} IS NULL THEN 0 ELSE 1 END)"
+                          for e in ekspresi)
+    return f"(({pembilang}) / NULLIF(({penyebut}), 0))"
+
+
+def sql_what_matters(dipilih: list[str] | tuple[str, ...],
+                     kolom_skor: dict[str, str]) -> str:
+    """Rata-rata kolom skor kriteria terpilih, NULL dikeluarkan penyebut."""
+    ekspresi = [kolom_skor[k] for k in dipilih
+                if k in kolom_skor and KRITERIA[k]["sifat"] != TIDAK_TERSEDIA]
+    if not ekspresi:
+        return "NULL"
+    return sql_rata_rata_tersedia(*ekspresi)
+
+
+#: Klausa ranking. NULLS LAST supaya ketiadaan data tidak menyamar jadi skor
+#: buruk, dan tidak pula naik ke atas.
+SQL_ORDER_BY = "ORDER BY what_matters_score DESC NULLS LAST"
+
+
+# ===========================================================================
+# 7. EKSPRESI SKOR SIAP-PAKAI UNTUK JALUR BACA
+# ===========================================================================
+# Dipakai `db.py` membangun query Discovery. Ditaruh di sini, bukan di db.py,
+# supaya rumusnya tetap hidup di satu tempat -- sama seperti fungsi Python di
+# atas, dan diuji sepasang dengannya.
+
+#: Kolom sumber default, sesuai alias di `_SEARCH_QUERY`.
+KOLOM_SUMBER_DEFAULT = {
+    "engagement_rate": "k.engagement_rate",
+    "audience_quality_score": "pc.audience_quality_score",
+    "authenticity_score": "pc.authenticity_score",
+    "performance_stability": "pc.performance_stability",
+    "post_frequency_reliability": "pc.post_frequency_reliability",
+    "median_views": "pc.median_views",
+}
+
+
+def sql_ekspresi_skor(kolom: dict[str, str] | None = None) -> dict[str, str]:
+    """kunci kriteria -> ekspresi SQL bernilai 0..100 (atau NULL).
+
+    Persentil memakai `percent_rank()`, jadi ekspresi ini WAJIB dievaluasi di
+    subquery yang cakupannya seluruh populasi pembanding -- bukan setelah
+    LIMIT. Menghitung persentil atas satu halaman akan memberi peringkat yang
+    artinya berubah-ubah tiap kali orang menggeser halaman.
+
+    Kriteria `content_quality` dan `brand_safety` sengaja `NULL::numeric`:
+    keduanya belum punya sumber, dan itu bukan sesuatu yang boleh ditambal di
+    jalur baca.
+    """
+    c = {**KOLOM_SUMBER_DEFAULT, **(kolom or {})}
+    er = sql_persentil(c["engagement_rate"])
+    aq = sql_rata_rata_tersedia(c["audience_quality_score"],
+                                c["authenticity_score"])
+    return {
+        "engagement": er,
+        "audience_quality": aq,
+        "consistency": sql_rata_rata_tersedia(
+            sql_ordinal(c["performance_stability"], TINGKAT_STABILITAS),
+            sql_ordinal(c["post_frequency_reliability"], TINGKAT_RELIABILITAS),
+        ),
+        # Bobot 70/30 dengan renormalisasi kalau salah satu NULL -- sepadan
+        # dengan `community_strength_score()`.
+        "community": (
+            f"((COALESCE({c['audience_quality_score']}, 0) * {BOBOT_COMMUNITY_KUALITAS}"
+            f" + COALESCE(({er}), 0) * {BOBOT_COMMUNITY_ER})"
+            f" / NULLIF("
+            f"(CASE WHEN {c['audience_quality_score']} IS NULL THEN 0 ELSE {BOBOT_COMMUNITY_KUALITAS} END)"
+            f" + (CASE WHEN ({er}) IS NULL THEN 0 ELSE {BOBOT_COMMUNITY_ER} END), 0))"
+        ),
+        "reach": sql_persentil(c["median_views"]),
+        "content_quality": "NULL::numeric",
+        "brand_safety": "NULL::numeric",
+    }
+
+
+def sql_jumlah_kontributor(dipilih: list[str] | tuple[str, ...],
+                           kolom_skor: dict[str, str]) -> str:
+    """Berapa kriteria terpilih yang benar-benar punya nilai.
+
+    Dibutuhkan UI: skor 100 dari satu kriteria tidak sebanding dengan skor 100
+    dari lima. Tanpa angka ini, keduanya terlihat sama.
+    """
+    ekspresi = [kolom_skor[k] for k in dipilih if k in kolom_skor]
+    if not ekspresi:
+        return "0"
+    return " + ".join(f"(CASE WHEN {e} IS NULL THEN 0 ELSE 1 END)"
+                      for e in ekspresi)
