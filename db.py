@@ -8,6 +8,7 @@ from typing import Iterable, Iterator, Sequence
 import psycopg2
 import psycopg2.extras
 
+import campaign_cost_metrics as ccm
 from config import PostgresConfig
 from transform import normalize_username
 
@@ -423,3 +424,146 @@ def update_profiles(conn, updates: Iterable[dict], commit: bool = True) -> int:
         conn.commit()
     logger.info("Update %d baris kol_directory (commit=%s)", affected, commit)
     return affected
+# ---------------------------------------------------------------------------
+# CPE — Cost Per Engagement, grain campaign x KOL
+# ---------------------------------------------------------------------------
+# Read-only, dan SENGAJA terpisah dari `search_kol_directory`.
+#
+# CPE bergrain (campaign, KOL); Discovery bergrain KOL. Satu KOL bisa ikut
+# banyak campaign dengan `deal_price` yang berbeda-beda, jadi CPE bukan satu
+# angka yang menempel pada kreator dan tidak bisa jadi kolom di hasil
+# pencarian. Memaksakannya ke sana berarti memilih diam-diam campaign mana
+# yang diwakilkan.
+#
+# Rumus dan sumber costnya hidup di `campaign_cost_metrics`, bukan di sini.
+
+
+@dataclass(frozen=True)
+class CampaignKolCPE:
+    """CPE satu KOL dalam satu campaign."""
+
+    campaign_kol_id: str
+    campaign_id: str | None
+    agency_kol_account_id: str | None
+    deal_price: float | None
+    currency: str | None
+    # SUM(likes + comments_count + shares) atas satu baris performa per
+    # deliverable. None berarti tidak ada satu komponen pun yang terukur --
+    # bukan nol.
+    total_engagement: int | None
+    deliverable_count: int | None
+    # Berapa deliverable yang `shares`-nya TIDAK NULL. Instagram tidak
+    # mengembalikan shares, jadi angka ini yang membedakan "tidak diukur"
+    # dari "nol".
+    deliverable_shares: int | None
+    # deal_price / total_engagement. None kalau salah satunya tidak ada,
+    # atau engagement-nya nol.
+    cpe: float | None
+
+
+def fetch_campaign_kol_cpe(
+    conn,
+    campaign_id: str | None = None,
+    agregasi: str = ccm.AGREGASI_DEFAULT,
+) -> list[CampaignKolCPE]:
+    """CPE per campaign x KOL.
+
+        CPE = campaign_kols.deal_price / (likes + comments_count + shares)
+
+    Biaya per SATU engagement: tanpa pengali 1.000, tanpa pengali 100, dan
+    tanpa views di penyebut.
+
+    `campaign_orders.total_amount` tidak dipakai dan tidak boleh dipakai --
+    satu order bisa mencakup beberapa creator, dan nilainya sudah termasuk
+    platform fee serta pajak. Membaginya rata ke KOL akan mengarang biaya
+    yang tidak pernah dinegosiasikan.
+
+    Kolom performa `campaign_content_performance` bersifat KUMULATIF sampai
+    snapshot-nya, jadi beberapa snapshot per deliverable digabung dengan
+    mengambil SATU baris terbaru/final -- prioritas `is_final`, lalu
+    `snapshot_date`, lalu `id` -- dan TIDAK dijumlahkan. Menjumlahkannya akan
+    menghitung satu deliverable sebanyak jumlah harinya dipantau.
+    """
+    sql = ccm.sql_cpe_campaign_kol(agregasi=agregasi)
+    with conn.cursor() as cur:
+        cur.execute(sql, {"campaign_id": campaign_id})
+        hasil = [
+            CampaignKolCPE(
+                campaign_kol_id=str(r[0]),
+                campaign_id=str(r[1]) if r[1] is not None else None,
+                agency_kol_account_id=str(r[2]) if r[2] is not None else None,
+                deal_price=float(r[3]) if r[3] is not None else None,
+                currency=r[4],
+                total_engagement=int(r[5]) if r[5] is not None else None,
+                deliverable_count=int(r[6]) if r[6] is not None else None,
+                deliverable_shares=int(r[7]) if r[7] is not None else None,
+                cpe=float(r[8]) if r[8] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+    logger.info("CPE campaign x KOL: %d baris (campaign_id=%r, agregasi=%r)",
+                len(hasil), campaign_id, agregasi)
+    return hasil
+
+
+@dataclass(frozen=True)
+class CampaignKolCPV:
+    """CPV satu KOL dalam satu campaign."""
+
+    campaign_kol_id: str
+    campaign_id: str | None
+    agency_kol_account_id: str | None
+    deal_price: float | None
+    currency: str | None
+    # SUM(views) atas SATU baris terbaru/final per deliverable. None berarti
+    # tidak ada satu deliverable pun yang views-nya terukur -- bukan nol.
+    total_views: int | None
+    deliverable_count: int | None
+    # deal_price / total_views, biaya per SATU view. None kalau salah satunya
+    # tidak ada, atau views-nya nol.
+    cpv: float | None
+
+
+def fetch_campaign_kol_cpv(
+    conn,
+    campaign_id: str | None = None,
+    agregasi: str = ccm.AGREGASI_DEFAULT,
+) -> list[CampaignKolCPV]:
+    """CPV per campaign x KOL.
+
+        CPV = campaign_kols.deal_price / SUM(views)
+
+    Biaya per SATU view: tanpa pengali 1.000, tanpa engagement di penyebut,
+    dan tanpa ER.
+
+    Sumber cost dan aturan snapshot identik dengan `fetch_campaign_kol_cpe` --
+    keduanya memakai CTE `performa` yang sama, jadi CPE dan CPV tidak mungkin
+    membaca baris snapshot yang berbeda. Yang berbeda hanya penyebutnya.
+
+    `campaign_orders.total_amount` tidak dipakai: satu order bisa mencakup
+    beberapa creator dan nilainya sudah termasuk platform fee serta pajak.
+    Rate card juga tidak -- itu harga daftar, bukan biaya campaign.
+    """
+    sql = ccm.sql_cpv_campaign_kol(agregasi=agregasi)
+    with conn.cursor() as cur:
+        cur.execute(sql, {"campaign_id": campaign_id})
+        hasil = [
+            CampaignKolCPV(
+                campaign_kol_id=str(r[0]),
+                campaign_id=str(r[1]) if r[1] is not None else None,
+                agency_kol_account_id=str(r[2]) if r[2] is not None else None,
+                deal_price=float(r[3]) if r[3] is not None else None,
+                currency=r[4],
+                total_views=int(r[5]) if r[5] is not None else None,
+                deliverable_count=int(r[6]) if r[6] is not None else None,
+                cpv=float(r[7]) if r[7] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+    logger.info("CPV campaign x KOL: %d baris (campaign_id=%r, agregasi=%r)",
+                len(hasil), campaign_id, agregasi)
+    return hasil
+
+

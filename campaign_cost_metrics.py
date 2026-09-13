@@ -193,3 +193,227 @@ def sql_cpv(cost: str, views: str = "views") -> str:
     if CPV_UNIT_FACTOR == 1:
         return f"{cost} / NULLIF({views}, 0)"
     return f"{cost} / NULLIF({views}, 0) * {CPV_UNIT_FACTOR}"
+
+
+# ===========================================================================
+# 5. CPE DI GRAIN CAMPAIGN x KOL
+# ===========================================================================
+# Struktur yang dipakai, seluruhnya SUDAH ADA:
+#
+#     campaign_kols                  deal_price      <- cost, 1 baris per KOL
+#       | 1:N
+#     campaign_kol_deliverables      campaign_kol_id
+#       | 1:N
+#     campaign_content_performance   likes, comments_count, shares
+#                                    snapshot_date, is_final
+#
+# `campaign_kols.total_engagement` SENGAJA tidak dipakai meski satu kolom dan
+# tanpa join: isinya tidak berkomentar, tabelnya 0 baris, dan tidak ada apa pun
+# yang menyatakan ia Like+Comment+Share. Definisi yang disepakati menyebut
+# ketiganya eksplisit, jadi ketiganya yang dijumlahkan.
+#
+# --------------------------------------------------------------------------
+# AGREGASI SNAPSHOT -- SUDAH DIPUTUSKAN
+# --------------------------------------------------------------------------
+# `campaign_content_performance` bergrain per-deliverable per-`snapshot_date`.
+#
+# KEPUTUSAN BISNIS: `likes`, `comments_count`, dan `shares` adalah KUMULATIF
+# sampai snapshot-nya. Karena itu CPE mengambil SATU baris terbaru/final per
+# deliverable, dan TIDAK MENJUMLAHKAN antar snapshot -- satu deliverable yang
+# dipantau tiga hari akan terhitung tiga kali kalau dijumlahkan.
+#
+# Urutan prioritasnya: `is_final`, lalu `snapshot_date`, lalu `id` sebagai
+# tie-break supaya hasilnya deterministik.
+#
+# Keputusan itu sejalan dengan bentuk tabelnya: ada `delta_views` dan
+# `delta_engagement` DI SAMPING `views` dan `total_engagement`, dan kolom delta
+# hanya perlu ada kalau kolom dasarnya kumulatif.
+AGREGASI_BARIS_TERAKHIR = "baris_terakhir_per_deliverable"
+
+#: TIDAK BERLAKU untuk `campaign_content_performance` -- kolomnya kumulatif,
+#: jadi menjumlahkan antar snapshot menghasilkan angka yang terlalu besar.
+#: Dipertahankan hanya supaya `sql_engagement_per_deliverable()` tetap bisa
+#: dipakai atas sumber PERIODIK kalau nanti ada, dan supaya test bisa
+#: menunjukkan bahwa memilih aturan yang salah memang mengubah hasilnya.
+AGREGASI_JUMLAH_SEMUA = "jumlah_semua_baris"
+
+AGREGASI_SNAPSHOT_SAH = (AGREGASI_BARIS_TERAKHIR, AGREGASI_JUMLAH_SEMUA)
+
+#: Aturan yang berlaku untuk CPE. Bukan tebakan -- ini keputusan bisnis.
+AGREGASI_DEFAULT = AGREGASI_BARIS_TERAKHIR
+
+#: Sumber performa. Dibuat parameter dengan alasan yang sama seperti
+#: `db._GROWTH_CTE_TEMPLATE`: test menyuntikkan klausa VALUES sebagai
+#: pengganti, jadi yang diuji SQL yang benar-benar dipakai produksi -- tanpa
+#: menulis satu baris pun. Pengganti harus menyediakan kolom
+#: `campaign_kol_deliverable_id`, `likes`, `comments_count`, `shares`,
+#: `snapshot_date`, `is_final`, beralias `p`.
+SUMBER_PERFORMA_DEFAULT = "public.campaign_content_performance p"
+
+
+def sql_engagement_per_deliverable(
+    sumber: str = SUMBER_PERFORMA_DEFAULT,
+    agregasi: str = AGREGASI_DEFAULT,
+) -> str:
+    """CTE `performa`: satu baris performa per deliverable.
+
+    Inilah tempat double-count dicegah. Satu deliverable yang dipantau 5 hari
+    punya 5 baris; menjumlahkan semuanya membuat angkanya 5x lipat.
+
+    Membawa `likes`, `comments_count`, `shares` (penyebut CPE) DAN `views`
+    (penyebut CPV) sekaligus, supaya aturan snapshot hidup di satu tempat.
+    Dua salinan aturan yang sama adalah cara tercepat membuat CPE dan CPV
+    memakai baris yang berbeda tanpa ada yang sadar.
+    """
+    if agregasi not in AGREGASI_SNAPSHOT_SAH:
+        raise ValueError(
+            f"agregasi {agregasi!r} tidak dikenal; pilih salah satu dari "
+            f"{AGREGASI_SNAPSHOT_SAH}")
+
+    if agregasi == AGREGASI_BARIS_TERAKHIR:
+        # `is_final` didahulukan; kalau belum ada baris penutup, pakai
+        # snapshot terbaru. Deterministik lewat tie-break ke id.
+        return f"""performa AS (
+        SELECT DISTINCT ON (p.campaign_kol_deliverable_id)
+               p.campaign_kol_deliverable_id AS deliverable_id,
+               p.likes, p.comments_count, p.shares, p.views
+          FROM {sumber}
+         ORDER BY p.campaign_kol_deliverable_id,
+                  p.is_final DESC NULLS LAST,
+                  p.snapshot_date DESC NULLS LAST,
+                  p.id DESC
+    )"""
+    return f"""performa AS (
+        SELECT p.campaign_kol_deliverable_id AS deliverable_id,
+               sum(p.likes)          AS likes,
+               sum(p.comments_count) AS comments_count,
+               sum(p.shares)         AS shares,
+               sum(p.views)          AS views
+          FROM {sumber}
+         GROUP BY 1
+    )"""
+
+
+def sql_cpe_campaign_kol(
+    sumber: str = SUMBER_PERFORMA_DEFAULT,
+    agregasi: str = AGREGASI_DEFAULT,
+) -> str:
+    """CPE per campaign x KOL, dari struktur yang sudah ada.
+
+    Mengembalikan satu baris per `campaign_kols.id`, dengan:
+
+        deal_price          cost, apa adanya dari campaign_kols
+        total_engagement    SUM(likes + comments_count + shares)
+        cpe                 deal_price / total_engagement, per 1 engagement
+        deliverable_count   berapa deliverable yang punya bacaan performa
+        deliverable_shares  berapa di antaranya yang `shares`-nya TIDAK NULL
+
+    `deliverable_shares` bukan hiasan. Instagram tidak mengembalikan shares,
+    jadi NULL di sana berarti "tidak diukur", bukan "nol". Angka ini membuat
+    perbedaan itu terlihat oleh pembaca, alih-alih tersembunyi di dalam
+    penjumlahan.
+
+    Kalau KETIGA komponen NULL untuk seluruh deliverable, `total_engagement`
+    NULL -- bukan 0 -- sehingga `cpe` ikut NULL. Nol engagement yang TERUKUR
+    tetap menghasilkan NULL juga, lewat NULLIF: biaya dibagi nol bukan angka
+    besar, melainkan angka yang tidak ada.
+    """
+    komponen = ("perf.likes", "perf.comments_count", "perf.shares")
+    jumlah = " + ".join(f"COALESCE({k}, 0)" for k in komponen)
+    ada_satu_pun = " OR ".join(f"{k} IS NOT NULL" for k in komponen)
+
+    return f"""WITH {sql_engagement_per_deliverable(sumber, agregasi)},
+    per_kol AS (
+        SELECT d.campaign_kol_id                                  AS campaign_kol_id,
+               sum({jumlah}) FILTER (WHERE {ada_satu_pun})        AS total_engagement,
+               count(*)      FILTER (WHERE {ada_satu_pun})        AS deliverable_count,
+               count(perf.shares)                                 AS deliverable_shares
+          FROM public.campaign_kol_deliverables d
+          JOIN performa perf ON perf.deliverable_id = d.id
+         GROUP BY 1
+    )
+    SELECT ck.id                AS campaign_kol_id,
+           ck.campaign_id,
+           ck.agency_kol_account_id,
+           ck.deal_price,
+           ck.currency,
+           pk.total_engagement,
+           pk.deliverable_count,
+           pk.deliverable_shares,
+           {sql_cpe_ekspresi('ck.deal_price', 'pk.total_engagement')} AS cpe
+      FROM public.campaign_kols ck
+      LEFT JOIN per_kol pk ON pk.campaign_kol_id = ck.id
+     WHERE (%(campaign_id)s::uuid IS NULL OR ck.campaign_id = %(campaign_id)s)
+     ORDER BY cpe ASC NULLS LAST, ck.id"""
+
+
+def sql_cpe_ekspresi(cost: str, engagement: str) -> str:
+    """`cost / engagement` dengan guard. Dipakai query di atas dan bisa
+    dipakai ulang di tempat lain tanpa menyalin NULLIF-nya."""
+    return f"{cost} / NULLIF({engagement}, 0)"
+
+
+# ===========================================================================
+# 6. CPV DI GRAIN CAMPAIGN x KOL
+# ===========================================================================
+# Struktur, sumber cost, dan aturan snapshot PERSIS sama dengan CPE di atas --
+# yang berbeda hanya penyebutnya:
+#
+#     CPE  ->  likes + comments_count + shares
+#     CPV  ->  views
+#
+# Karena itu keduanya memakai CTE `performa` yang SAMA. `views` juga kumulatif
+# sampai snapshot-nya, jadi aturan "satu baris terbaru/final per deliverable"
+# berlaku tanpa perkecualian: menjumlahkan antar snapshot akan menghitung satu
+# post sebanyak jumlah hari ia dipantau.
+
+
+def sql_cpv_ekspresi(cost: str, views: str) -> str:
+    """`cost / views` -- biaya per SATU view.
+
+    `CPV_UNIT_FACTOR` = 1, jadi tidak ada pengali yang muncul di SQL. Kalau
+    suatu saat ada yang mengubahnya, pengalinya ikut tercetak di sini dan
+    perubahan itu terlihat, bukan tersembunyi.
+    """
+    dasar = f"{cost} / NULLIF({views}, 0)"
+    return dasar if CPV_UNIT_FACTOR == 1 else f"({dasar}) * {CPV_UNIT_FACTOR}"
+
+
+def sql_cpv_campaign_kol(
+    sumber: str = SUMBER_PERFORMA_DEFAULT,
+    agregasi: str = AGREGASI_DEFAULT,
+) -> str:
+    """CPV per campaign x KOL, dari struktur yang sudah ada.
+
+    Satu baris per `campaign_kols.id`:
+
+        deal_price          cost, apa adanya dari campaign_kols
+        total_views         SUM(views) atas satu baris terbaru per deliverable
+        cpv                 deal_price / total_views, per 1 view
+        deliverable_count   berapa deliverable yang punya bacaan views
+
+    `total_views` NULL -- bukan 0 -- kalau tidak satu deliverable pun punya
+    bacaan views. Nol view yang TERUKUR juga menghasilkan CPV NULL lewat
+    NULLIF: biaya dibagi nol bukan angka besar, melainkan angka yang tidak ada.
+    """
+    return f"""WITH {sql_engagement_per_deliverable(sumber, agregasi)},
+    per_kol AS (
+        SELECT d.campaign_kol_id                             AS campaign_kol_id,
+               sum(perf.views)                               AS total_views,
+               count(perf.views)                             AS deliverable_count
+          FROM public.campaign_kol_deliverables d
+          JOIN performa perf ON perf.deliverable_id = d.id
+         GROUP BY 1
+    )
+    SELECT ck.id                AS campaign_kol_id,
+           ck.campaign_id,
+           ck.agency_kol_account_id,
+           ck.deal_price,
+           ck.currency,
+           pk.total_views,
+           pk.deliverable_count,
+           {sql_cpv_ekspresi('ck.deal_price', 'pk.total_views')} AS cpv
+      FROM public.campaign_kols ck
+      LEFT JOIN per_kol pk ON pk.campaign_kol_id = ck.id
+     WHERE (%(campaign_id)s::uuid IS NULL OR ck.campaign_id = %(campaign_id)s)
+     ORDER BY cpv ASC NULLS LAST, ck.id"""
