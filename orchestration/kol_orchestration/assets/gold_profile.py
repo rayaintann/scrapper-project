@@ -126,23 +126,100 @@ KEPUTUSAN DESAIN
    menyentuh schema sama sekali. Definisi Connected TIDAK diubah: endpoint
    menghitungnya sendiri dari social_account dan tidak pernah membaca kolom
    ini.
+
+8. EMPAT METRIK VIEWS DIBAWA APA ADANYA DARI LAYER FEATURE.
+   `views_analyzed_count`, `avg_views`, `median_views`,
+   `view_to_follower_ratio` dan `like_to_view_ratio` (migration 036) disalin
+   dari `feature.{ig,tt}_engagement_analysis` lewat CTE `metrik_views` —
+   TIDAK dihitung ulang di sini. Alasannya sama persis dengan keputusan #2:
+   satu rumus, satu tempat.
+
+   Kedua tabel feature bergrain `(social_account_id)` saja; platformnya
+   ditentukan oleh tabel mana yang dipakai, jadi UNION-nya menambahkan
+   platform sebagai literal supaya join ke kartu tepat satu lawan satu.
+
+   Konsekuensi yang disengaja: L2 tidak akan pernah punya angka yang tidak
+   ada di feature, dan angka L2 selalu bisa diverifikasi dengan membandingkan
+   kartu terhadap baris feature akun yang sama — nilainya harus IDENTIK,
+   tanpa transformasi apa pun. Itulah yang diuji
+   `tests/test_view_metrics.py::TestL2GoldCarryThrough`.
+
+   Kolom-kolom ini IKUT penjaga `IS DISTINCT FROM` (keputusan #5). Kalau
+   tidak, kartu yang hanya berubah Avg Views-nya akan dianggap tidak berubah
+   dan angka barunya tidak pernah ditulis.
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
 
 from dagster import AssetKey, MetadataValue, Output, asset
 
 from kol_orchestration.resources import PostgresResource
 
+# db.py ada di root project. Ditambahkan ke sys.path dengan pola yang sama
+# seperti audience.py, supaya rumus Growth turunan (daily growth + proyeksi
+# 30 hari) dipakai APA ADANYA dari sana dan tidak ditulis dua kali.
+# Kalau rumusnya berubah, ia berubah di satu file.
+_ROOT = Path(__file__).resolve().parents[3]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from db import SQL_GROWTH_CTE  # noqa: E402
+from metrics_thresholds import (  # noqa: E402
+    RINGKASAN_AMBANG,
+    sql_audience_quality_tier,
+    sql_rising_creator,
+    sql_stability,
+    sql_gender_reliability,
+    sql_growth_class,
+    sql_monitoring_priority,
+    sql_post_frequency_reliability,
+)
+
 GROUP = "l2_gold"
 _PROFILE = AssetKey("unified_profile")
+# Kartu ini sekarang membawa empat metrik views dari layer feature, jadi kedua
+# asset itu harus sudah selesai sebelum kartu dibangun. Tanpa dep ini Dagster
+# boleh menjalankan kartu lebih dulu, dan kartu akan menyalin nilai feature dari
+# run SEBELUMNYA -- angka basi yang tidak terlihat salah.
+_IG_ENGAGEMENT = AssetKey("ig_engagement_analysis")
+_TT_ENGAGEMENT = AssetKey("tt_engagement_analysis")
 
 
 # ---------------------------------------------------------------------------
 # CTE bersama untuk statistik dan upsert
 # ---------------------------------------------------------------------------
 _CTE = """
-    WITH badge AS (
+    WITH """ + SQL_GROWTH_CTE + """,
+    er_roster AS (
+        -- ER ROSTER -- sumber yang disepakati untuk Monitoring Priority.
+        --
+        -- Sebelumnya priority dihitung dari
+        -- `feature.*_engagement_analysis.engagement_rate`, yang hanya terisi
+        -- untuk 38 akun. `public.kol_directory.engagement_rate` terisi untuk
+        -- 1.736 dari 7.432 KOL (23,4%), jadi perpindahan ini menaikkan cakupan
+        -- 45x tanpa menghitung ER baru satu pun.
+        --
+        -- SATUANNYA SAMA-SAMA PERSEN, sudah diperiksa terhadap 28 akun yang
+        -- punya keduanya: 6,94 vs 16,15 · 2,75 vs 3,78 · 2,21 vs 1,81. Nilainya
+        -- berbeda karena sampel dan metodenya berbeda, tapi skalanya sama --
+        -- tidak ada faktor 100 yang tersembunyi seperti pada `er_followers_daily`.
+        --
+        -- `kol_directory` bergrain per KOL sementara kartu ini bergrain
+        -- (social_account_id, platform), jadi dipetakan lewat
+        -- `kol_social_account`. `max()` dipakai sebagai penjaga: pada data
+        -- sekarang pemetaannya satu-lawan-satu (0 akun bercabang), dan agregat
+        -- memastikan CTE ini tetap satu baris per akun kalau itu berubah.
+        SELECT ksa.social_account_id,
+               max(kd.engagement_rate) AS er_pct
+          FROM public.kol_directory kd
+          JOIN public.kol_social_account ksa ON ksa.kol_id = kd.id
+         WHERE kd.engagement_rate IS NOT NULL
+         GROUP BY 1
+    ),
+    badge AS (
         -- BADGE PLATFORM (centang biru), bukan Connected. Lihat keputusan #7.
         --
         -- TikTok diambil dari harmonization, lapisan bersih tertinggi yang
@@ -174,6 +251,80 @@ _CTE = """
              ORDER BY h.social_account_id, h.date DESC
         ) tt
     ),
+    metrik_views AS (
+        -- Avg Views, Median Views, V2F, L2V -- DIBAWA APA ADANYA dari layer
+        -- feature, tidak dihitung ulang di sini. Alasan yang sama dengan
+        -- keputusan #2 untuk followers_growth: rumusnya sudah dijalankan
+        -- feature_engagement.py, dan menuliskannya kedua kali berarti dua
+        -- definisi yang cepat atau lambat berbeda.
+        --
+        -- Grain kedua tabel feature adalah (social_account_id) TANPA platform,
+        -- karena platformnya sudah ditentukan oleh tabel mana yang dipakai.
+        -- Kartu ini bergrain (social_account_id, platform), jadi platformnya
+        -- ditambahkan sebagai literal supaya join-nya tepat satu lawan satu --
+        -- akun yang punya Instagram DAN TikTok mendapat angkanya masing-masing,
+        -- bukan angka salah satu platform yang bocor ke kartu satunya.
+        SELECT social_account_id, 'instagram'::text AS platform,
+               views_analyzed_count, avg_views, median_views,
+               view_to_follower_ratio, like_to_view_ratio,
+               -- Paid Ratio, Share Rate, Post Frequency (migration 037).
+               -- DIBAWA APA ADANYA, alasan yang sama dengan keempat metrik
+               -- views di atas: rumusnya sudah dijalankan feature_engagement.py.
+               paid_ratio, paid_signal_count, share_rate,
+               post_frequency_monthly, observation_days,
+               -- Dibutuhkan migration 038: pembilang post_frequency_daily &
+               -- syarat reliability, dan ER yang jadi dasar priority.
+               post_frequency_count, engagement_rate,
+               save_rate, viral_frequency, viral_post_count,
+               viral_threshold_views, content_topic,
+               content_topic_source, format_dominant
+          FROM feature.ig_engagement_analysis
+        UNION ALL
+        SELECT social_account_id, 'tiktok'::text AS platform,
+               views_analyzed_count, avg_views, median_views,
+               view_to_follower_ratio, like_to_view_ratio,
+               paid_ratio, paid_signal_count, share_rate,
+               post_frequency_monthly, observation_days,
+               post_frequency_count, engagement_rate,
+               save_rate, viral_frequency, viral_post_count,
+               viral_threshold_views, content_topic,
+               content_topic_source, format_dominant
+          FROM feature.tt_engagement_analysis
+    ),
+    -- Female %/Male % dari layer audience. Tabel terpisah dari engagement,
+    -- jadi join-nya sendiri -- grainnya sama, (social_account_id) + platform
+    -- ditentukan tabel asalnya.
+    metrik_audiens AS (
+        SELECT social_account_id, 'instagram'::text AS platform,
+               female_pct, male_pct, gender_known_pct,
+               audience_quality_score, authenticity_score,
+               interest_top, interest_source
+          FROM feature.ig_audience_analysis
+        UNION ALL
+        SELECT social_account_id, 'tiktok'::text AS platform,
+               female_pct, male_pct, gender_known_pct,
+               audience_quality_score, authenticity_score,
+               interest_top, interest_source
+          FROM feature.tt_audience_analysis
+    ),
+    -- PERFORMANCE STABILITY: simpangan baku ER historis, dalam POIN PERSEN.
+    --
+    -- `er_followers_daily` disimpan sebagai FRAKSI (0,0000164 .. 0,1615),
+    -- sementara ambang stabilitas dinyatakan dalam persen. Dikali 100 DI SINI,
+    -- sekali, sebelum stddev dihitung -- kalau tidak, simpangan baku 0,004
+    -- akan dibandingkan dengan ambang 1 dan setiap akun tercatat sangat stabil.
+    --
+    -- `stddev_samp`, bukan `stddev_pop`: periodenya adalah SAMPEL dari
+    -- perilaku akun, bukan seluruh populasinya. Ia juga mengembalikan NULL
+    -- untuk n < 2, yang kebetulan sejalan dengan syarat minimal tiga periode.
+    stabilitas AS (
+        SELECT social_account_id, platform,
+               count(er_followers_daily)::int AS er_periods,
+               round(stddev_samp(er_followers_daily * 100)::numeric, 4) AS er_stddev_pp
+          FROM l2_gold.kol_metric_daily
+         GROUP BY 1, 2
+    ),
+
     terbaru AS (
         SELECT DISTINCT ON (p.social_account_id, pl.key)
                p.social_account_id,
@@ -189,12 +340,69 @@ _CTE = """
                p.followers_count, p.following_count, p.media_count,
                p.tier,
                -- PERSEN, dari snapshot yang sama. Tidak dihitung ulang.
-               p.followers_growth
+               p.followers_growth,
+               -- Empat metrik views dari layer feature. LEFT JOIN, jadi akun
+               -- yang belum pernah punya post tetap dapat kartu -- kolomnya
+               -- NULL, dan NULL di sini berarti "belum ada post yang diukur",
+               -- bukan "nol views".
+               v.views_analyzed_count,
+               v.avg_views,
+               v.median_views,
+               v.view_to_follower_ratio,
+               v.like_to_view_ratio,
+               -- Paid Ratio / Share Rate / Post Frequency dari feature.
+               v.paid_ratio, v.paid_signal_count, v.share_rate,
+               v.post_frequency_monthly, v.observation_days,
+               v.post_frequency_count,
+               -- Monitoring Priority memakai ER ROSTER, bukan ER feature.
+               er.er_pct AS monitoring_er_pct,
+               -- post per HARI. monthly = angka ini x 30; keduanya disimpan
+               -- karena requirement memakai dua satuan yang berbeda.
+               round(v.post_frequency_count::numeric
+                     / NULLIF(v.observation_days, 0), 4) AS post_frequency_daily,
+               -- Female %/Male % dari feature audience.
+               au.female_pct, au.male_pct, au.gender_known_pct,
+               au.audience_quality_score, au.authenticity_score,
+               au.interest_top  AS audience_interest_top,
+               au.interest_source AS audience_interest_source,
+               v.save_rate, v.viral_frequency, v.viral_post_count,
+               v.viral_threshold_views, v.content_topic,
+               v.content_topic_source, v.format_dominant,
+               st.er_periods, st.er_stddev_pp,
+               -- Growth turunan. Diambil dari CTE `growth` yang rumusnya
+               -- diimpor dari db.py, dan HANYA kalau pasangan snapshotnya
+               -- memang snapshot kartu ini -- kalau kartunya menunjuk
+               -- tanggal lain, growth-nya bukan milik kartu ini.
+               CASE WHEN gr.current_snapshot_date = p.date
+                    THEN gr.previous_snapshot_date END AS previous_snapshot_date,
+               CASE WHEN gr.current_snapshot_date = p.date
+                    THEN gr.previous_followers END     AS previous_followers,
+               CASE WHEN gr.current_snapshot_date = p.date
+                    THEN gr.days_between END           AS days_between,
+               CASE WHEN gr.current_snapshot_date = p.date
+                    THEN gr.daily_growth END           AS daily_growth,
+               CASE WHEN gr.current_snapshot_date = p.date
+                    THEN gr.projected_30d END          AS projected_30d,
+               CASE WHEN gr.current_snapshot_date = p.date
+                    THEN gr.projected_followers_30d END AS projected_followers_30d
         FROM l1_silver.unified_profile p
         JOIN public.platforms pl ON pl.id = p.platform_id
         LEFT JOIN badge b
                ON b.social_account_id = p.social_account_id
               AND b.platform = pl.key
+        LEFT JOIN metrik_views v
+               ON v.social_account_id = p.social_account_id
+              AND v.platform = pl.key
+        LEFT JOIN metrik_audiens au
+               ON au.social_account_id = p.social_account_id
+              AND au.platform = pl.key
+        LEFT JOIN growth gr
+               ON gr.social_account_id = p.social_account_id
+        LEFT JOIN stabilitas st
+               ON st.social_account_id = p.social_account_id
+              AND st.platform = pl.key
+        LEFT JOIN er_roster er
+               ON er.social_account_id = p.social_account_id
         WHERE p.social_account_id IS NOT NULL
         -- tie-break eksplisit supaya hasilnya deterministik
         ORDER BY p.social_account_id, pl.key,
@@ -208,6 +416,21 @@ SQL_UPSERT = _CTE + """
         bio, website, is_verified, is_private,
         followers_count, following_count, media_count, tier,
         profile_snapshot_date, followers_growth,
+        views_analyzed_count, avg_views, median_views,
+        view_to_follower_ratio, like_to_view_ratio,
+        paid_ratio, paid_signal_count, share_rate,
+        post_frequency_monthly, observation_days,
+        female_pct, male_pct, gender_known_pct,
+        previous_snapshot_date, previous_followers, days_between,
+        daily_growth, projected_30d, projected_followers_30d,
+        post_frequency_daily, post_frequency_count, monitoring_er_pct,
+        growth_class, gender_reliability, post_frequency_reliability,
+        monitoring_priority,
+        save_rate, viral_frequency, viral_post_count, viral_threshold_views,
+        content_topic, content_topic_source, format_dominant,
+        audience_quality_score, authenticity_score, audience_quality_tier,
+        audience_interest_top, audience_interest_source,
+        er_stddev_pp, er_periods, performance_stability, rising_creator,
         created_at, updated_at
         -- SENGAJA tidak disebut (tetap NULL): rate_card, rate_card_currency,
         -- rate_card_min_fee, rate_card_max_fee, rate_card_post_types
@@ -217,6 +440,31 @@ SQL_UPSERT = _CTE + """
            t.bio, t.website, t.is_verified, t.is_private,
            t.followers_count, t.following_count, t.media_count, t.tier,
            t.profile_snapshot_date, t.followers_growth,
+           t.views_analyzed_count, t.avg_views, t.median_views,
+           t.view_to_follower_ratio, t.like_to_view_ratio,
+           t.paid_ratio, t.paid_signal_count, t.share_rate,
+           t.post_frequency_monthly, t.observation_days,
+           t.female_pct, t.male_pct, t.gender_known_pct,
+           t.previous_snapshot_date, t.previous_followers, t.days_between,
+           t.daily_growth, t.projected_30d, t.projected_followers_30d,
+           t.post_frequency_daily, t.post_frequency_count, t.monitoring_er_pct,
+           -- Keempat label di bawah TIDAK ditulis tangan: CASE-nya digenerate
+           -- metrics_thresholds.py dari konstanta yang sama yang dipakai fungsi
+           -- Python-nya. Mengubah ambang = mengubah satu file, bukan file ini.
+           """ + sql_growth_class("t.followers_growth") + """,
+           """ + sql_gender_reliability("t.gender_known_pct") + """,
+           """ + sql_post_frequency_reliability(
+               "t.observation_days", "t.post_frequency_count") + """,
+           """ + sql_monitoring_priority("t.monitoring_er_pct") + """,
+           t.save_rate, t.viral_frequency, t.viral_post_count,
+           t.viral_threshold_views, t.content_topic, t.content_topic_source,
+           t.format_dominant,
+           t.audience_quality_score, t.authenticity_score,
+           """ + sql_audience_quality_tier("t.audience_quality_score") + """,
+           t.audience_interest_top, t.audience_interest_source,
+           t.er_stddev_pp, t.er_periods,
+           """ + sql_stability("t.er_stddev_pp", "t.er_periods") + """,
+           """ + sql_rising_creator("t.followers_growth") + """,
            now(), now()
     FROM terbaru t
     ON CONFLICT (social_account_id, platform) DO UPDATE SET
@@ -234,6 +482,51 @@ SQL_UPSERT = _CTE + """
         tier                  = EXCLUDED.tier,
         profile_snapshot_date = EXCLUDED.profile_snapshot_date,
         followers_growth      = EXCLUDED.followers_growth,
+        views_analyzed_count   = EXCLUDED.views_analyzed_count,
+        avg_views              = EXCLUDED.avg_views,
+        median_views           = EXCLUDED.median_views,
+        view_to_follower_ratio = EXCLUDED.view_to_follower_ratio,
+        like_to_view_ratio     = EXCLUDED.like_to_view_ratio,
+        -- Penugasan LANGSUNG, bukan COALESCE: hasil NULL harus menimpa nilai
+        -- lama. Akun yang kehilangan sampel post tidak boleh terus memajang
+        -- Paid Ratio atau Share Rate basi.
+        paid_ratio             = EXCLUDED.paid_ratio,
+        paid_signal_count      = EXCLUDED.paid_signal_count,
+        share_rate             = EXCLUDED.share_rate,
+        post_frequency_monthly = EXCLUDED.post_frequency_monthly,
+        observation_days       = EXCLUDED.observation_days,
+        female_pct             = EXCLUDED.female_pct,
+        male_pct               = EXCLUDED.male_pct,
+        gender_known_pct       = EXCLUDED.gender_known_pct,
+        previous_snapshot_date = EXCLUDED.previous_snapshot_date,
+        previous_followers     = EXCLUDED.previous_followers,
+        days_between           = EXCLUDED.days_between,
+        daily_growth           = EXCLUDED.daily_growth,
+        projected_30d          = EXCLUDED.projected_30d,
+        projected_followers_30d = EXCLUDED.projected_followers_30d,
+        post_frequency_daily   = EXCLUDED.post_frequency_daily,
+        post_frequency_count   = EXCLUDED.post_frequency_count,
+        monitoring_er_pct      = EXCLUDED.monitoring_er_pct,
+        growth_class           = EXCLUDED.growth_class,
+        gender_reliability     = EXCLUDED.gender_reliability,
+        post_frequency_reliability = EXCLUDED.post_frequency_reliability,
+        monitoring_priority    = EXCLUDED.monitoring_priority,
+        save_rate              = EXCLUDED.save_rate,
+        viral_frequency        = EXCLUDED.viral_frequency,
+        viral_post_count       = EXCLUDED.viral_post_count,
+        viral_threshold_views  = EXCLUDED.viral_threshold_views,
+        content_topic          = EXCLUDED.content_topic,
+        content_topic_source   = EXCLUDED.content_topic_source,
+        format_dominant        = EXCLUDED.format_dominant,
+        audience_quality_score = EXCLUDED.audience_quality_score,
+        authenticity_score     = EXCLUDED.authenticity_score,
+        audience_quality_tier  = EXCLUDED.audience_quality_tier,
+        audience_interest_top  = EXCLUDED.audience_interest_top,
+        audience_interest_source = EXCLUDED.audience_interest_source,
+        er_stddev_pp           = EXCLUDED.er_stddev_pp,
+        er_periods             = EXCLUDED.er_periods,
+        performance_stability  = EXCLUDED.performance_stability,
+        rising_creator         = EXCLUDED.rising_creator,
         updated_at            = now()
     -- Kolom rate_card_* SENGAJA tidak ada di atas: asset ini tidak mengisinya,
     -- jadi tidak boleh menimpanya balik jadi NULL kalau nanti diisi asset lain.
@@ -247,6 +540,48 @@ SQL_UPSERT = _CTE + """
        OR kol_profile_card.bio             IS DISTINCT FROM EXCLUDED.bio
        OR kol_profile_card.website         IS DISTINCT FROM EXCLUDED.website
        OR kol_profile_card.is_verified     IS DISTINCT FROM EXCLUDED.is_verified
+       -- Kolom migration 037. WAJIB ikut di penjaga ini: tanpa mereka, baris
+       -- yang HANYA berubah di metrik baru dianggap tidak berubah dan upsert
+       -- mengembalikan 0 -- kolomnya tetap NULL selamanya tanpa satu pun error.
+       OR kol_profile_card.paid_ratio             IS DISTINCT FROM EXCLUDED.paid_ratio
+       OR kol_profile_card.share_rate             IS DISTINCT FROM EXCLUDED.share_rate
+       OR kol_profile_card.post_frequency_monthly IS DISTINCT FROM EXCLUDED.post_frequency_monthly
+       OR kol_profile_card.observation_days       IS DISTINCT FROM EXCLUDED.observation_days
+       OR kol_profile_card.female_pct             IS DISTINCT FROM EXCLUDED.female_pct
+       OR kol_profile_card.male_pct               IS DISTINCT FROM EXCLUDED.male_pct
+       OR kol_profile_card.gender_known_pct       IS DISTINCT FROM EXCLUDED.gender_known_pct
+       OR kol_profile_card.daily_growth           IS DISTINCT FROM EXCLUDED.daily_growth
+       OR kol_profile_card.projected_30d          IS DISTINCT FROM EXCLUDED.projected_30d
+       OR kol_profile_card.projected_followers_30d
+                                                  IS DISTINCT FROM EXCLUDED.projected_followers_30d
+       OR kol_profile_card.previous_followers     IS DISTINCT FROM EXCLUDED.previous_followers
+       OR kol_profile_card.days_between           IS DISTINCT FROM EXCLUDED.days_between
+       -- Kolom migration 038. Wajib ikut, alasan yang sama dengan 037: tanpa
+       -- ini baris yang hanya berubah di label dianggap tidak berubah.
+       OR kol_profile_card.growth_class           IS DISTINCT FROM EXCLUDED.growth_class
+       OR kol_profile_card.gender_reliability     IS DISTINCT FROM EXCLUDED.gender_reliability
+       OR kol_profile_card.post_frequency_daily   IS DISTINCT FROM EXCLUDED.post_frequency_daily
+       OR kol_profile_card.post_frequency_count   IS DISTINCT FROM EXCLUDED.post_frequency_count
+       OR kol_profile_card.post_frequency_reliability
+                                                  IS DISTINCT FROM EXCLUDED.post_frequency_reliability
+       OR kol_profile_card.monitoring_er_pct      IS DISTINCT FROM EXCLUDED.monitoring_er_pct
+       OR kol_profile_card.monitoring_priority    IS DISTINCT FROM EXCLUDED.monitoring_priority
+       -- Kolom migration 039. Wajib ikut di penjaga, alasan yang sama:
+       -- tanpa ini baris yang hanya berubah di metrik baru dianggap tidak
+       -- berubah dan upsert mengembalikan 0 tanpa satu pun error.
+       OR kol_profile_card.save_rate              IS DISTINCT FROM EXCLUDED.save_rate
+       OR kol_profile_card.viral_frequency        IS DISTINCT FROM EXCLUDED.viral_frequency
+       OR kol_profile_card.content_topic          IS DISTINCT FROM EXCLUDED.content_topic
+       OR kol_profile_card.format_dominant        IS DISTINCT FROM EXCLUDED.format_dominant
+       OR kol_profile_card.audience_quality_tier  IS DISTINCT FROM EXCLUDED.audience_quality_tier
+       OR kol_profile_card.audience_interest_top  IS DISTINCT FROM EXCLUDED.audience_interest_top
+       OR kol_profile_card.performance_stability  IS DISTINCT FROM EXCLUDED.performance_stability
+       OR kol_profile_card.er_stddev_pp           IS DISTINCT FROM EXCLUDED.er_stddev_pp
+       -- `er_periods` ikut diperiksa terpisah: akun tanpa satu pun ER
+       -- terukur punya er_periods 0 dan er_stddev_pp NULL, jadi memeriksa
+       -- simpangan bakunya saja tidak pernah mendeteksi perubahan itu.
+       OR kol_profile_card.er_periods             IS DISTINCT FROM EXCLUDED.er_periods
+       OR kol_profile_card.rising_creator         IS DISTINCT FROM EXCLUDED.rising_creator
        OR kol_profile_card.is_private      IS DISTINCT FROM EXCLUDED.is_private
        OR kol_profile_card.followers_count IS DISTINCT FROM EXCLUDED.followers_count
        OR kol_profile_card.following_count IS DISTINCT FROM EXCLUDED.following_count
@@ -256,6 +591,17 @@ SQL_UPSERT = _CTE + """
                                            IS DISTINCT FROM EXCLUDED.profile_snapshot_date
        OR kol_profile_card.followers_growth
                                            IS DISTINCT FROM EXCLUDED.followers_growth
+    -- Keempat metrik views ikut penjaga ini. Tanpa mereka, kartu yang HANYA
+    -- berubah Avg Views-nya (mis. setelah post baru masuk) akan dianggap tidak
+    -- berubah dan angka barunya tidak pernah ditulis.
+       OR kol_profile_card.views_analyzed_count
+                                           IS DISTINCT FROM EXCLUDED.views_analyzed_count
+       OR kol_profile_card.avg_views       IS DISTINCT FROM EXCLUDED.avg_views
+       OR kol_profile_card.median_views    IS DISTINCT FROM EXCLUDED.median_views
+       OR kol_profile_card.view_to_follower_ratio
+                                           IS DISTINCT FROM EXCLUDED.view_to_follower_ratio
+       OR kol_profile_card.like_to_view_ratio
+                                           IS DISTINCT FROM EXCLUDED.like_to_view_ratio
 """
 
 SQL_STATS = _CTE + """
@@ -274,7 +620,12 @@ SQL_STATS = _CTE + """
            count(followers_count)                                AS followers_terisi,
            count(tier)                                           AS tier_terisi,
            min(profile_snapshot_date)                            AS snapshot_tertua,
-           max(profile_snapshot_date)                            AS snapshot_terbaru
+           max(profile_snapshot_date)                            AS snapshot_terbaru,
+           -- Cakupan empat metrik views yang dibawa dari feature.
+           count(avg_views)                                      AS avg_views_terisi,
+           count(median_views)                                   AS median_views_terisi,
+           count(view_to_follower_ratio)                         AS v2f_terisi,
+           count(like_to_view_ratio)                             AS l2v_terisi
     FROM terbaru
     """
 
@@ -295,7 +646,9 @@ def _jalankan(postgres: PostgresResource) -> Output:
             cur.execute(SQL_STATS)
             (kartu, kartu_ig, kartu_tt, growth_terisi, growth_null,
              growth_ig, growth_tt, followers_terisi, tier_terisi,
-             snapshot_tertua, snapshot_terbaru) = cur.fetchone()
+             snapshot_tertua, snapshot_terbaru,
+             avg_views_terisi, median_views_terisi,
+             v2f_terisi, l2v_terisi) = cur.fetchone()
 
             if kartu == 0:
                 conn.rollback()
@@ -336,6 +689,11 @@ def _jalankan(postgres: PostgresResource) -> Output:
             "followers_count_terisi": followers_terisi,
             "tier_terisi": tier_terisi,
             "rentang_snapshot": f"{snapshot_tertua} .. {snapshot_terbaru}",
+            # Empat metrik views, dibawa dari feature (keputusan #8).
+            "avg_views_terisi": avg_views_terisi,
+            "median_views_terisi": median_views_terisi,
+            "v2f_terisi": v2f_terisi,
+            "l2v_terisi": l2v_terisi,
             "satuan_followers_growth": MetadataValue.text(
                 "PERSEN (numeric), dibawa apa adanya dari "
                 "l1_silver.unified_profile pada snapshot yang sama dengan "
@@ -354,7 +712,7 @@ def _jalankan(postgres: PostgresResource) -> Output:
 @asset(
     name="kol_profile_card",
     group_name=GROUP,
-    deps=[_PROFILE],
+    deps=[_PROFILE, _IG_ENGAGEMENT, _TT_ENGAGEMENT],
     kinds={"postgres"},
     description=(
         "l2_gold.kol_profile_card — kartu profil KOL, grain "
@@ -364,7 +722,9 @@ def _jalankan(postgres: PostgresResource) -> Output:
         "followers_growth dibawa apa adanya dari snapshot itu dan satuannya "
         "PERSEN, bukan jumlah orang — ini rumah account-grain untuk growth, "
         "yang tidak bisa diisi di kol_metric_daily karena grain-nya digerakkan "
-        "posted_at. Kolom rate_card_* sengaja dibiarkan NULL."
+        "posted_at. Membawa juga Avg Views, Median Views, V2F dan L2V apa "
+        "adanya dari feature.{ig,tt}_engagement_analysis — tidak dihitung "
+        "ulang di sini. Kolom rate_card_* sengaja dibiarkan NULL."
     ),
 )
 def kol_profile_card(postgres: PostgresResource) -> Output:

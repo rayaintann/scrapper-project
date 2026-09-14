@@ -125,6 +125,18 @@ class PostgresPalsu(PostgresResource):
         meja["koneksi"].append(koneksi)
         return koneksi
 
+    # `unified_follower` memakai dua helper resource ini langsung di badan
+    # asset-nya, bukan lewat satu fungsi `_jalankan` yang bisa di-patch seperti
+    # modul lain. Keduanya dijawab di sini supaya rantai bisa diuji tetap
+    # OFFLINE, tanpa mengubah kode produksi hanya demi tes.
+    def count_rows(self, tabel: str) -> int:
+        _MEJA[self.kunci]["query"].append(f"count_rows({tabel})")
+        return 0
+
+    def call_function(self, sql: str):
+        _MEJA[self.kunci]["query"].append(sql)
+        return None
+
 
 def buat_postgres_palsu(sidik_jari: dict) -> PostgresPalsu:
     kunci = str(len(_MEJA))
@@ -356,7 +368,7 @@ class RantaiSampaiL2(unittest.TestCase):
         """Eksekusi `transform_chain_job` sungguhan, dengan SQL-nya di-stub.
 
         Yang diuji ORKESTRASInya: apakah job yang dipicu sensor benar-benar
-        menjalankan ke-15 asset dan berhenti di L2 Gold. Isi SQL tiap asset
+        menjalankan SELURUH asset di chain dan berhenti di L2 Gold. Isi SQL tiap asset
         tidak disentuh dan tidak diubah -- hanya satu helper per modul yang
         diganti, supaya tes ini tetap offline dan tidak menulis ke database.
         """
@@ -366,8 +378,8 @@ class RantaiSampaiL2(unittest.TestCase):
 
         from dagster import Output
         from kol_orchestration.assets import (
-            feature_engagement, feature_post, gold, gold_post, gold_profile,
-            harmonization, silver,
+            audience, creator_age, feature_engagement, feature_post, followers,
+            gold, gold_post, gold_profile, harmonization, silver,
         )
         from kol_orchestration.repository import defs
 
@@ -384,6 +396,14 @@ class RantaiSampaiL2(unittest.TestCase):
             (gold_post, "_jalankan_post_metric"),
             (gold_post, "_jalankan_content_format"),
             (gold_profile, "_jalankan"),
+            # Rantai follower -> audiens, ikut chain sejak 9 September.
+            (followers, "_jalankan_harm"),
+            (audience, "_jalankan_feature"),
+            (audience, "_tulis_gold"),
+            # Dua fitur UMUR, ikut chain sejak migration 042. Terpisah karena
+            # memang dua fitur: umur AUDIENS vs umur KREATOR.
+            (audience, "_tulis_age_terukur"),
+            (creator_age, "_jalankan"),
         )
 
         with warnings.catch_warnings():
@@ -410,6 +430,16 @@ class RantaiSampaiL2(unittest.TestCase):
         # Ujung rantai memang L2 Gold, bukan berhenti di Feature.
         for l2 in ("kol_profile_card", "kol_metric_daily", "kol_metric_monthly"):
             self.assertIn(l2, dijalankan)
+        # Rantai follower -> audiens ikut dijalankan job yang sama, bukan job
+        # terpisah: inilah yang sebelumnya tidak pernah otomatis.
+        for a in ("instagram_follower", "tiktok_follower", "unified_follower",
+                  "audience_feature", "audience_gold"):
+            self.assertIn(a, dijalankan)
+        # Kedua fitur umur juga ikut rantai yang sama. Diuji terpisah supaya
+        # kalau salah satu dilepas dari chain, pesan gagalnya menyebut fitur
+        # mana yang hilang.
+        self.assertIn("audience_age_measured", dijalankan)
+        self.assertIn("creator_age", dijalankan)
 
     def test_urutan_eksekusi_l0_ke_l2_dijaga_dagster(self):
         """Urutan datang dari `deps` di job hasil resolve, bukan urutan daftar."""
@@ -504,9 +534,17 @@ class SensorTidakMemanggilActor(unittest.TestCase):
         self.assertEqual(len(query_dijalankan(pg)), 1, "cukup satu round-trip")
         sql = query_dijalankan(pg)[0].upper()
         self.assertTrue(sql.lstrip().startswith("SELECT"))
+        # Dicocokkan sebagai KATA UTUH, bukan substring. Pemeriksaan substring
+        # memberi false positive pada nama kolom yang sah: `INSERT_AT` --
+        # kolom watermark kedua tabel follower -- mengandung "INSERT" padahal
+        # query-nya murni baca. Yang ingin dilarang adalah perintah tulis,
+        # dan perintah selalu berdiri sebagai kata sendiri.
         for terlarang in ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
                           "ALTER", "TRUNCATE"):
-            self.assertNotIn(terlarang, sql)
+            self.assertIsNone(
+                re.search(rf"{terlarang}", sql),
+                f"{terlarang} muncul sebagai perintah di: {sql[:200]}",
+            )
 
     def test_modul_sensor_tidak_mengimpor_apify(self):
         pohon = ast.parse(_sumber(ORCH / "sensors.py"))
@@ -754,7 +792,16 @@ class MekanismeDeteksiStabil(unittest.TestCase):
         for t in TABEL_DIPANTAU:
             self.assertIn("l0_raw." + t, sql)
         self.assertEqual(sql.count("count(*)"), len(TABEL_DIPANTAU))
-        self.assertEqual(sql.count("max(fetched_at)"), len(TABEL_DIPANTAU))
+        # Satu agregat watermark per tabel, memakai kolom milik tabel itu --
+        # bukan satu nama kolom untuk semuanya. Tabel follower memakai
+        # `insert_at` karena memang tidak punya `fetched_at`.
+        self.assertEqual(
+            sum(sql.count(f"max({k})")
+                for k in {sensors.kolom_watermark(t) for t in TABEL_DIPANTAU}),
+            len(TABEL_DIPANTAU),
+        )
+        self.assertEqual(sql.count("max(insert_at)"), 2)
+        self.assertEqual(sql.count("max(fetched_at)"), len(TABEL_DIPANTAU) - 2)
 
     def test_tidak_memakai_now_atau_waktu_evaluasi(self):
         # Inti requirement: kalau sidik jari mengandung waktu sekarang, sensor
@@ -781,14 +828,25 @@ class MekanismeDeteksiStabil(unittest.TestCase):
         self.assertTrue(all(c.ditutup for c in koneksi_dibuat(pg)))
 
     def test_tabel_dipantau_hanya_sumber_rantai_transformasi(self):
-        # Tabel l0_raw lain (comments, stories, followers, roster) sengaja tidak
-        # dipantau: tidak ada asset di transform_chain_job yang membacanya.
-        self.assertEqual(len(TABEL_DIPANTAU), 8)
+        """Aturannya tetap sama: dipantau HANYA kalau ada asset yang membacanya.
+
+        Yang berubah 9 September adalah kenyataannya, bukan aturannya. Kedua
+        tabel follower dulu tidak dipantau karena memang tidak ada asset yang
+        membacanya; sejak `instagram_follower`/`tiktok_follower` masuk
+        `TRANSFORM_ASSETS`, alasan itu tidak berlaku lagi dan keduanya ikut
+        dipantau.
+
+        comments/stories/tagged_posts/roster tetap di luar, dengan alasan yang
+        persis sama seperti dulu.
+        """
+        self.assertEqual(len(TABEL_DIPANTAU), 10)
         for t in TABEL_DIPANTAU:
             self.assertTrue(t.endswith("_apify") or t.endswith("_official"), t)
+        for wajib in ("ig_followers_apify", "tt_followers_apify"):
+            self.assertIn(wajib, TABEL_DIPANTAU)
         for tidak_dipantau in ("ig_comments_apify", "ig_stories_apify",
-                               "ig_followers_apify", "kol_roster_import",
-                               "tt_comments_apify", "ig_tagged_posts_apify"):
+                               "kol_roster_import", "tt_comments_apify",
+                               "ig_tagged_posts_apify"):
             self.assertNotIn(tidak_dipantau, TABEL_DIPANTAU)
 
     def test_cursor_berbentuk_json_berversi(self):

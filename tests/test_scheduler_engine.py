@@ -704,7 +704,12 @@ class OneShotJobMeneruskanKeGold(unittest.TestCase):
         self.assertTrue(hasil.success)
         self.assertEqual(urutan, ["scrape", "transform"])
         keluaran = hasil.output_for_node("transform_to_gold")
-        self.assertEqual(keluaran["asset_dimaterialisasi"], 15)
+        # Diambil dari sumber kebenarannya, bukan angka yang ditulis ulang di
+        # sini: yang diuji adalah "seluruh asset chain diteruskan apa adanya",
+        # dan itu tetap benar saat chain bertambah (15 -> 20 pada 9 September,
+        # ketika rantai follower/audiens ikut masuk).
+        self.assertEqual(keluaran["asset_dimaterialisasi"],
+                         len(self.one_shot.TRANSFORM_ASSETS))
 
     def test_transform_TIDAK_jalan_kalau_scrape_gagal(self):
         urutan = []

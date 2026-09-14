@@ -1102,3 +1102,112 @@ def skor_kualitas(followers: list[dict]) -> dict[str, int | None]:
     aq = round((fq + au) / 2) if au is not None else fq
     return {"follower_quality_score": fq, "authenticity_score": au,
             "audience_quality_score": aq}
+
+
+# ===========================================================================
+# NORMALISASI TINGKAT GEO  (dipakai asset audience, migration 039)
+# ===========================================================================
+# Masalah yang diperbaiki: `l2_gold.audience_geo_daily` menulis SELURUH
+# tebakan lokasi dengan `geo_level = 'city'`, termasuk yang sebenarnya
+# provinsi. Akibatnya "Bali" dan "Lampung" berdiri sejajar dengan "Bandung"
+# dan "Surabaya" seolah setara, dan siapa pun yang memfilter kota akan
+# mendapat campuran dua tingkat administratif yang berbeda.
+#
+# Pengetahuannya SUDAH ADA di modul ini -- `PROVINSI_ID` sudah membedakan
+# keduanya saat menebak. Yang hilang hanya penerusan informasi itu ke L2.
+# Fungsi di bawah mengembalikannya, tanpa leksikon baru dan tanpa sumber baru.
+#
+# `island` sengaja dipisah dari `province`: "Jawa", "Sumatera", "Kalimantan"
+# dan "Sulawesi" ada di `PROVINSI_ID` sebagai jaring terakhir ketika teksnya
+# hanya menyebut pulau, tapi memperlakukannya sebagai provinsi akan membuat
+# "Jawa" bersaing dengan "Jawa Barat" di daftar yang sama.
+PULAU_ID = frozenset({
+    "Jawa", "Sumatera", "Kalimantan", "Sulawesi", "Papua", "Maluku",
+    "Nusa Tenggara",
+})
+
+#: Nama setingkat provinsi yang kebetulan ada di `KOTA_ID`, bukan di
+#: `PROVINSI_ID`. Keduanya memang provinsi di Indonesia -- Bali beribu kota
+#: Denpasar (yang juga ada di leksikon itu, sebagai kota), dan Aceh adalah
+#: provinsi, bukan kota.
+#:
+#: Diperbaiki DI SINI, bukan dengan memindahkan entrinya di `KOTA_ID`:
+#: leksikon itu dipakai menebak lokasi follower dan mengubahnya akan mengubah
+#: hasil inferensi. Yang salah bukan tebakannya, melainkan tingkat yang
+#: dilekatkan padanya saat menulis ke L2.
+PROVINSI_DI_LEKSIKON_KOTA = frozenset({"Bali", "Aceh"})
+
+#: Pulau yang juga muncul lewat `KOTA_ID`, alasan yang sama.
+PULAU_DI_LEKSIKON_KOTA = frozenset({"Madura"})
+
+#: Seluruh nama provinsi yang bisa dihasilkan `PROVINSI_ID`, tanpa yang
+#: sebenarnya pulau. Dihitung sekali dari leksikon itu sendiri supaya
+#: penambahan provinsi baru di sana otomatis ikut terklasifikasi di sini.
+NAMA_PROVINSI = (frozenset(PROVINSI_ID.values()) - PULAU_ID) | PROVINSI_DI_LEKSIKON_KOTA
+
+
+def tingkat_geo(geo_key: str | None) -> str:
+    """'island' | 'province' | 'city' untuk satu nilai `geo_key`.
+
+    Default-nya 'city' dan itu disengaja: leksikon kota jauh lebih besar
+    daripada leksikon provinsi, jadi nilai yang tidak dikenali sebagai
+    provinsi/pulau hampir pasti memang kota. Yang berbahaya adalah kebalikannya
+    -- provinsi yang lolos sebagai kota -- dan itulah yang dicegah di sini.
+    """
+    if not geo_key:
+        return "city"
+    kunci = geo_key.strip()
+    if kunci in PULAU_ID or kunci in PULAU_DI_LEKSIKON_KOTA:
+        return "island"
+    if kunci in NAMA_PROVINSI:
+        return "province"
+    return "city"
+
+
+# ===========================================================================
+# TOPIK KONTEN  (dipakai feature_engagement, migration 039)
+# ===========================================================================
+# Klasifikasi topik dari KONTEN NYATA creator -- caption dan hashtag post --
+# bukan dari username, bukan dari display name, dan bukan dari hash ID seperti
+# prototype.
+#
+# LEKSIKONNYA SENGAJA `INTEREST` YANG SUDAH ADA, bukan taksonomi baru.
+# Dua alasan: kosakatanya sudah dipakai `audience_interest_daily`, sehingga
+# minat audiens dan topik konten bisa dibandingkan langsung; dan menambah
+# taksonomi kedua berarti dua daftar yang harus dirawat bersamaan.
+#
+# `username` TIDAK ikut diperiksa. `tebak_interest()` menerimanya untuk
+# keperluan lain, tapi menebak topik dari nama akun persis yang dilarang
+# requirement -- "@nasigoreng.id" bukan bukti bahwa kontennya tentang makanan.
+def topik_konten(caption: str | None, hashtags=None) -> str | None:
+    """Topik satu post dari caption + hashtag, atau None kalau tak terbaca.
+
+    Mengembalikan SATU topik: yang kata kuncinya cocok lebih dulu menurut
+    urutan `INTEREST`. Satu post bisa menyinggung banyak hal, tapi yang
+    dibutuhkan hilir adalah topik dominan per creator, dan itu dihitung dari
+    modus topik seluruh post -- bukan dari menumpuk banyak label per post.
+    """
+    bagian = [caption or ""]
+    if hashtags:
+        # hashtags bertipe jsonb/list; tag digabung sebagai kata biasa supaya
+        # '#skincareroutine' bisa dicocokkan seperti teks.
+        if isinstance(hashtags, str):
+            bagian.append(hashtags)
+        else:
+            try:
+                bagian.extend(str(h) for h in hashtags)
+            except TypeError:
+                bagian.append(str(hashtags))
+    teks = _normalisasi(" ".join(bagian))
+    if not teks:
+        return None
+    for ch in " ".join(bagian):
+        kat = EMOJI_INTEREST.get(ch)
+        if kat:
+            return kat
+    for kategori, kata_kunci in INTEREST.items():
+        # Ambang tiga huruf, sama seperti `tebak_interest`: kata dua huruf
+        # terlalu mudah bertabrakan lintas bahasa.
+        if any(len(k) >= 3 and _cocok_kata(teks, k) for k in kata_kunci):
+            return kategori
+    return None

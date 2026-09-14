@@ -289,19 +289,51 @@ def test_db_growth_l2_sama_dengan_l1(conn):
 
 @pytest.mark.needs_db
 def test_db_rumus_growth_masih_yang_lama(conn):
-    """Hitung ulang manual dari harmonization; harus identik dengan L1."""
+    """Hitung ulang manual; harus identik dengan `followers_growth` di L1.
+
+    DIPERBARUI UNTUK SANITY GUARD MIGRATION 035
+    ===========================================
+    Versi sebelumnya membaca `l0_harmonization` MENTAH dan memakai
+    `LAG(followers_count)` biasa. Itu benar sampai migration 035, yang mengubah
+    dua hal sekaligus:
+
+      1. `followers_count` yang tersimpan di L1 adalah nilai TER-GUARD; angka
+         yang tidak masuk akal di-NULL-kan. Harmonization masih menyimpan angka
+         mentahnya.
+      2. `prev_followers_count` menjadi snapshot VALID terakhir -- baris yang
+         di-NULL-kan guard DILEWATI, bukan dipakai dan bukan memutus rantai.
+
+    Karena itu versi lama gagal dengan 2 baris beda, dan keduanya bukan bug:
+
+        lydiaaas__  2026-09-08  harmonization prev=9  current=8   -> harap -11,1111
+        zeejkt48    2026-09-08  harmonization prev=17 current=17  -> harap   0,0000
+
+    Keduanya akun Mega (3,6 juta dan 4,5 juta di roster) yang scrape TikTok-nya
+    mengembalikan 8 dan 17 follower. Guard bekerja tepat; testnya yang basi.
+
+    Versi ini menghitung ulang dari `unified_profile.followers_count` -- yaitu
+    nilai SETELAH guard -- dengan pola gaps-and-islands yang sama seperti 035,
+    sehingga yang diuji tetap RUMUSNYA, bukan guard-nya (guard punya
+    tests/test_followers_guard.py sendiri).
+    """
     assert satu(conn, """
-        WITH src AS (
-          SELECT social_account_id, date, followers_count
-            FROM l0_harmonization.instagram_profile
-          UNION ALL
-          SELECT social_account_id, date, follower_count
-            FROM l0_harmonization.tiktok_profile),
+        WITH pulau AS (
+          SELECT social_account_id, date, followers_count,
+                 count(followers_count) OVER (
+                   PARTITION BY social_account_id ORDER BY date
+                   ROWS UNBOUNDED PRECEDING) AS grp
+            FROM l1_silver.unified_profile),
+        bawa_maju AS (
+          SELECT p.*,
+                 first_value(p.followers_count) OVER (
+                   PARTITION BY p.social_account_id, p.grp ORDER BY p.date
+                 ) AS followers_valid
+            FROM pulau p),
         w AS (
           SELECT social_account_id, date, followers_count,
-                 LAG(followers_count) OVER (
+                 LAG(followers_valid) OVER (
                    PARTITION BY social_account_id ORDER BY date) AS prev
-            FROM src)
+            FROM bawa_maju)
         SELECT count(*)
           FROM w JOIN l1_silver.unified_profile u
             ON u.social_account_id = w.social_account_id AND u.date = w.date

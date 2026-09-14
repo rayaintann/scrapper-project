@@ -69,9 +69,9 @@ gratis dan idempoten.
 
 TABEL YANG DIPANTAU
 ===================
-Hanya delapan tabel yang benar-benar jadi sumber rantai transformasi, yaitu
+Sepuluh tabel yang benar-benar jadi sumber rantai transformasi, yaitu
 pasangan `_apify` + `_official` yang dibaca keempat procedure harmonization.
-Tabel `l0_raw` lain (comments, stories, tagged_posts, followers, roster) sengaja
+Tabel `l0_raw` lain (comments, stories, tagged_posts, roster) sengaja
 TIDAK dipantau: tidak ada asset di `transform_chain_job` yang membacanya, jadi
 memicu rantai karenanya hanya menghasilkan run kosong.
 """
@@ -107,7 +107,7 @@ MINIMUM_INTERVAL_SECONDS = 60
 
 #: Tabel `l0_raw` yang benar-benar jadi sumber `transform_chain_job`.
 #: Urutannya dipertahankan supaya SQL dan cursor deterministik.
-#: Kedelapan tabel ini punya kolom `fetched_at` -- sudah diverifikasi langsung
+#: Kolom watermark tiap tabel ada di `KOLOM_WATERMARK` di bawah -- diverifikasi langsung
 #: ke information_schema, bukan diasumsikan.
 TABEL_DIPANTAU: tuple[str, ...] = (
     "ig_profile_apify",
@@ -118,7 +118,39 @@ TABEL_DIPANTAU: tuple[str, ...] = (
     "ig_media_snapshots_official",
     "tt_video_apify",
     "tt_video_official",
+    # Ditambahkan 9 September bersama kelima asset follower/audiens yang masuk
+    # `TRANSFORM_ASSETS`. Sebelum itu kedua tabel ini sengaja tidak dipantau --
+    # dan alasannya benar pada masanya: tidak ada asset di job yang membacanya,
+    # jadi memicu rantai karenanya hanya menghasilkan run kosong.
+    #
+    # Alasan itu sekarang tidak berlaku lagi: `instagram_follower` dan
+    # `tiktok_follower` membaca tepat kedua tabel ini. Keduanya sudah berisi
+    # 2.761 dan 1.100 baris yang selama ini tidak pernah memicu apa pun.
+    "ig_followers_apify",
+    "tt_followers_apify",
 )
+
+#: Kolom watermark PER TABEL, bukan satu nama untuk semua.
+#:
+#: Delapan tabel pertama memakai `fetched_at`. Kedua tabel follower TIDAK
+#: punya kolom itu -- diverifikasi ke information_schema, bukan diasumsikan:
+#: keduanya memakai `insert_at` (kapan baris mendarat) dan `scraped_at` (kapan
+#: batch-nya di-scrape). Yang dipakai `insert_at`, karena itulah padanan
+#: `fetched_at`: diisi sekali saat baris masuk dan tidak pernah diubah.
+#: `scraped_at` sama untuk seluruh batch, jadi kurang tajam sebagai watermark.
+#:
+#: Asumsi "semua tabel punya fetched_at" sempat membuat sensor gagal di tiap
+#: tick dengan `UndefinedColumn` begitu kedua tabel ini ditambahkan. Peta ini
+#: yang mencegahnya terulang saat tabel berikutnya menyusul.
+KOLOM_WATERMARK: dict[str, str] = {
+    "ig_followers_apify": "insert_at",
+    "tt_followers_apify": "insert_at",
+}
+WATERMARK_DEFAULT = "fetched_at"
+
+
+def kolom_watermark(tabel: str) -> str:
+    return KOLOM_WATERMARK.get(tabel, WATERMARK_DEFAULT)
 
 SCHEMA = "l0_raw"
 
@@ -128,7 +160,7 @@ class Sidik:
     """Sidik jari satu tabel `l0_raw` pada satu saat.
 
     `baris`     jumlah baris; naik hanya kalau ada INSERT (tabelnya append-only).
-    `watermark` `max(fetched_at)`; waktu baris TERBARU mendarat di database.
+    `watermark` `max(<kolom watermark tabel itu>)`; waktu baris TERBARU mendarat.
                 None kalau tabelnya kosong atau kolomnya belum pernah diisi.
     """
 
@@ -162,8 +194,8 @@ def sql_sidik_jari(tabel: tuple[str, ...] = TABEL_DIPANTAU) -> str:
     input pengguna atau dari database.
     """
     bagian = [
-        "SELECT '{t}' AS tabel, count(*) AS baris, max(fetched_at) AS watermark "
-        "FROM {s}.{t}".format(t=t, s=SCHEMA)
+        "SELECT '{t}' AS tabel, count(*) AS baris, max({w}) AS watermark "
+        "FROM {s}.{t}".format(t=t, s=SCHEMA, w=kolom_watermark(t))
         for t in tabel
     ]
     return "\nUNION ALL\n".join(bagian)
@@ -242,6 +274,84 @@ def baca_cursor(mentah: str | None) -> dict[str, Sidik] | None:
     return hasil
 
 
+# ---------------------------------------------------------------------------
+# PEMULIHAN RUN GAGAL
+# ---------------------------------------------------------------------------
+# Masalah yang diperbaiki (audit 9 September):
+#
+#   cursor DAN run_key sama-sama maju saat run DIMINTA, bukan saat run BERHASIL.
+#   Jadi kalau `transform_chain_job` gagal, tick berikutnya melihat sidik jari
+#   yang sama dengan cursor -> SkipReason, selamanya. Datanya tidak pernah
+#   ditransformasi, dan tidak ada yang memberi tahu siapa pun.
+#
+# Perbaikannya SENGAJA aditif, bukan mengubah arti cursor:
+#
+#   * Sidik jari tetap maju persis seperti sebelumnya, jadi perilaku "tidak ada
+#     data baru -> skip" tidak berubah sama sekali.
+#   * Cursor menyimpan SATU field tambahan, `menunggu`, berisi run_key terakhir
+#     yang diminta. Field itu diabaikan `baca_cursor()`, jadi format lama tetap
+#     terbaca dan format baru tetap kompatibel.
+#   * Tiap tick menanyakan status run itu ke Dagster. Kalau GAGAL, sensor
+#     meminta ulang dengan run_key bersuffix percobaan -- karena run_key yang
+#     sama akan ditolak Dagster, dan penolakan itulah yang semula membuat
+#     kegagalan jadi permanen.
+#
+# Kalau run tidak ditemukan (instance baru, riwayat dibersihkan), sensor TIDAK
+# menebak: pending dibuang dan alur berjalan normal. Menebak "berarti gagal"
+# akan memicu run ulang yang tidak perlu tiap kali riwayat hilang.
+#: Berapa kali satu keadaan data boleh dicoba ulang otomatis. Setelah ini
+#: sensor berhenti mencoba dan menuliskannya di SkipReason -- supaya kegagalan
+#: yang sesungguhnya butuh perbaikan tidak tersamar jadi retry tanpa akhir.
+MAX_PERCOBAAN = 3
+
+
+def baca_menunggu(mentah: str | None) -> dict | None:
+    """Ambil bagian `menunggu` dari cursor mentah. None kalau tidak ada."""
+    if not mentah:
+        return None
+    try:
+        isi = json.loads(mentah)
+    except (ValueError, TypeError):
+        return None
+    m = isi.get("menunggu") if isinstance(isi, dict) else None
+    if not isinstance(m, dict) or "run_key" not in m:
+        return None
+    return {"run_key": str(m["run_key"]), "percobaan": int(m.get("percobaan", 1))}
+
+
+def _status_run(context, run_key: str) -> str | None:
+    """Status run dengan `run_key` itu, atau None kalau tidak ditemukan.
+
+    Dibungkus try/except lebar dengan sengaja: sensor tidak boleh mati hanya
+    karena pencarian riwayat gagal. Kalau tidak bisa dipastikan, jawabannya
+    None dan alur berjalan normal.
+    """
+    try:
+        from dagster import DagsterRunStatus, RunsFilter
+
+        runs = context.instance.get_runs(
+            filters=RunsFilter(tags={"dagster/run_key": run_key}), limit=1
+        )
+        if not runs:
+            return None
+        status = runs[0].status
+        if status == DagsterRunStatus.SUCCESS:
+            return "sukses"
+        if status in (DagsterRunStatus.FAILURE, DagsterRunStatus.CANCELED):
+            return "gagal"
+        return "berjalan"
+    except Exception as exc:  # noqa: BLE001
+        context.log.warning("Tidak bisa memeriksa status run %s: %s", run_key, exc)
+        return None
+
+
+def _cursor_dengan_menunggu(cursor_baru: str, run_key: str, percobaan: int) -> str:
+    """Sisipkan `menunggu` ke cursor tanpa menyentuh bagian sidik jarinya."""
+    isi = json.loads(cursor_baru)
+    isi["menunggu"] = {"run_key": run_key, "percobaan": percobaan}
+    return json.dumps(isi, separators=(",", ":"), sort_keys=True)
+
+
 def kunci_run(sidik: dict[str, Sidik]) -> str:
     """`run_key` deterministik dari keadaan data, bukan dari waktu.
 
@@ -283,7 +393,7 @@ def _ringkas(sidik: dict[str, Sidik], nama_tabel: list[str]) -> str:
     # yang mulai berjalan hanya karena kode ini di-deploy.
     default_status=DefaultSensorStatus.STOPPED,
     description=(
-        "Event-based, BUKAN schedule. Mendeteksi baris baru di 8 tabel sumber "
+        "Event-based, BUKAN schedule. Mendeteksi baris baru di 10 tabel sumber "
         "l0_raw lewat sidik jari (count(*), max(fetched_at)), lalu menjalankan "
         + TRANSFORM_JOB_NAME + ": L0 RAW -> L0 Harmonization -> L1 Silver -> "
         "Feature -> L2 Gold. Tidak pernah memanggil Apify; scraping tetap "
@@ -321,12 +431,66 @@ def l0_raw_new_data_sensor(context: SensorEvaluationContext,
             cursor=cursor_baru,
         )
 
+    # --- pemulihan: run yang diminta tick sebelumnya gagal? ------------------
+    # Diperiksa SEBELUM perbandingan sidik jari, karena justru kasus yang mau
+    # ditangkap adalah "sidik jarinya sama persis, tapi transformasinya belum
+    # pernah berhasil".
+    menunggu = baca_menunggu(context.cursor)
+    if menunggu:
+        status = _status_run(context, menunggu["run_key"])
+        if status == "berjalan":
+            return SensorResult(
+                skip_reason=SkipReason(
+                    f"Run {menunggu['run_key']} masih berjalan. Tick ini "
+                    f"dilewati supaya tidak ada dua {TRANSFORM_JOB_NAME} "
+                    f"bersamaan di atas data yang sama."
+                ),
+                cursor=_cursor_dengan_menunggu(
+                    cursor_baru, menunggu["run_key"], menunggu["percobaan"]),
+            )
+        if status == "gagal":
+            percobaan = menunggu["percobaan"] + 1
+            if percobaan > MAX_PERCOBAAN:
+                context.log.error(
+                    "Run %s gagal %d kali; berhenti mencoba otomatis.",
+                    menunggu["run_key"], menunggu["percobaan"],
+                )
+                return SensorResult(
+                    skip_reason=SkipReason(
+                        f"{TRANSFORM_JOB_NAME} gagal {menunggu['percobaan']}x "
+                        f"untuk keadaan data yang sama (run_key "
+                        f"{menunggu['run_key']}). Sensor berhenti mencoba "
+                        f"otomatis supaya kegagalannya terlihat, bukan tersamar "
+                        f"jadi retry tanpa akhir. Perbaiki penyebabnya lalu "
+                        f"jalankan {TRANSFORM_JOB_NAME} manual."
+                    ),
+                    cursor=cursor_baru,
+                )
+            kunci_ulang = f"{menunggu['run_key']}#r{percobaan}"
+            context.log.warning(
+                "Run %s GAGAL. Meminta ulang sebagai %s (percobaan %d/%d).",
+                menunggu["run_key"], kunci_ulang, percobaan, MAX_PERCOBAAN,
+            )
+            return SensorResult(
+                run_requests=[
+                    RunRequest(
+                        run_key=kunci_ulang,
+                        tags={
+                            "l0_raw/pemicu": SENSOR_NAME,
+                            "l0_raw/percobaan_ulang": str(percobaan),
+                        },
+                    )
+                ],
+                cursor=_cursor_dengan_menunggu(cursor_baru, kunci_ulang, percobaan),
+            )
+        # "sukses" atau tidak diketahui -> tidak ada yang perlu dipulihkan.
+
     baru = tabel_dengan_data_baru(sebelumnya, sekarang)
     if not baru:
         return SensorResult(
             skip_reason=SkipReason(
                 "Tidak ada data baru di l0_raw: jumlah baris dan max(fetched_at) "
-                "kedelapan tabel sumber sama dengan tick sebelumnya. {} tidak "
+                "kesepuluh tabel sumber sama dengan tick sebelumnya. {} tidak "
                 "dijalankan.".format(TRANSFORM_JOB_NAME)
             ),
             # Cursor tetap ditulis ulang: kalau ada tabel yang jumlah barisnya
@@ -350,7 +514,10 @@ def l0_raw_new_data_sensor(context: SensorEvaluationContext,
                 },
             )
         ],
-        cursor=cursor_baru,
+        # Sidik jarinya tetap maju seperti sebelumnya; yang ditambahkan hanya
+        # catatan run mana yang sedang ditunggu, supaya tick berikutnya bisa
+        # tahu kalau run itu gagal.
+        cursor=_cursor_dengan_menunggu(cursor_baru, run_key, 1),
     )
 
 

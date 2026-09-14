@@ -42,6 +42,11 @@ antar asset:
         -> feature    ig/tt_engagement_analysis, ig/tt_post_analysis
         -> l2_gold    kol_profile_card,
                       kol_metric_daily -> kol_metric_monthly
+
+    l0_harmonization  instagram_follower, tiktok_follower
+        -> l1_silver  unified_follower
+        -> feature    audience_feature
+        -> l2_gold    audience_gold
 """
 
 from __future__ import annotations
@@ -100,6 +105,39 @@ TRANSFORM_ASSETS = (
     "kol_metric_monthly",
     "post_metric",
     "content_format_daily",
+    # --- rantai follower -> audiens -------------------------------------
+    # Ditambahkan setelah audit 9 September menemukan kelima asset ini
+    # TERDAFTAR di Definitions tapi TIDAK PERNAH ikut job mana pun, sehingga
+    # tidak ada jalur otomatis apa pun menuju tabel audiens.
+    #
+    # Buktinya bukan pembacaan kode: `l1_silver.unified_follower` sudah
+    # diperbarui 2026-09-08, sementara `l2_gold.audience_*_daily` masih
+    # bertanggal 2026-08-26. Upstream bergerak, hilirnya diam 13 hari.
+    #
+    # Urutannya tidak perlu diatur di sini -- Dagster menurunkannya sendiri
+    # dari `deps=` tiap asset:
+    #   instagram_follower ─┐
+    #   tiktok_follower    ─┴→ unified_follower → audience_feature
+    #                                              → audience_gold
+    "instagram_follower",
+    "tiktok_follower",
+    "unified_follower",
+    "audience_feature",
+    "audience_gold",
+    # --- dua fitur UMUR, ditambahkan bersama migration 042 ----------------
+    # Sengaja disebut terpisah supaya terlihat bahwa keduanya BUKAN satu
+    # fitur: `audience_age_measured` mengisi umur AUDIENS dari jalur Insights
+    # (l1_silver.unified_audience -> l2_gold.audience_demographics_daily),
+    # sementara `creator_age` mengisi umur KREATOR di kartu profil.
+    #
+    # Keduanya murah saat sumbernya kosong -- yang pertama berhenti setelah
+    # satu COUNT, yang kedua hanya membaca bio yang sudah ada di kartu -- jadi
+    # tidak ada alasan menundanya sampai sumbernya menyala. Yang mahal justru
+    # kebalikannya: asset yang terdaftar tapi tidak pernah ikut job mana pun,
+    # persis kasus yang ditemukan audit 9 September untuk rantai follower di
+    # atas.
+    "audience_age_measured",
+    "creator_age",
 )
 
 
@@ -113,6 +151,7 @@ def _semua_asset():
     `repository` yang mengimpor modul ini, bukan sebaliknya.
     """
     from kol_orchestration.assets.audience import audience_assets
+    from kol_orchestration.assets.creator_age import creator_age_assets
     from kol_orchestration.assets.feature_engagement import feature_engagement_assets
     from kol_orchestration.assets.feature_post import feature_post_assets
     from kol_orchestration.assets.followers import follower_assets
@@ -126,7 +165,7 @@ def _semua_asset():
         *harmonization_assets, *silver_assets,
         *feature_engagement_assets, *feature_post_assets,
         *gold_assets, *gold_post_assets, *gold_profile_assets,
-        *follower_assets, *audience_assets,
+        *follower_assets, *audience_assets, *creator_age_assets,
     ]
 
 
