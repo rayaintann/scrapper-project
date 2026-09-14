@@ -9,6 +9,7 @@ import psycopg2
 import psycopg2.extras
 
 import campaign_cost_metrics as ccm
+import emv as emv_mod
 import kol_attribute_taxonomy as kat
 import what_matters_scoring as wm
 from config import PostgresConfig
@@ -994,6 +995,93 @@ def fetch_campaign_kol_cpv(
 
     logger.info("CPV campaign x KOL: %d baris (campaign_id=%r, agregasi=%r)",
                 len(hasil), campaign_id, agregasi)
+    return hasil
+
+
+# ===========================================================================
+# EMV -- rentang nilai media dari engagement
+# ===========================================================================
+# Sumbernya `l2_gold.post_metric` di database `kol`, dan hanya itu. EMV tidak
+# memakai campaign cost (CPE masih terblokir karena campaign_kols kosong) dan
+# tidak memakai rate card -- `unified_rate_card.fee` adalah harga jasa yang
+# diminta kreator, bukan nilai yang dihasilkan konten.
+@dataclass(frozen=True)
+class EmvKol:
+    """EMV satu akun, hasil agregasi post yang engagement-nya terukur."""
+
+    social_account_id: str | None
+    platform: str | None
+    post_total: int
+    post_terukur: int
+    post_tak_terukur: int
+    engagement: int | None
+    emv_min: float | None
+    emv_max: float | None
+    mata_uang: str = emv_mod.MATA_UANG
+
+
+def fetch_emv_per_post(conn, platform: str | None = None) -> list[emv_mod.EmvPost]:
+    """EMV per post dari `l2_gold.post_metric`.
+
+        Engagement = likes + comments
+        EMV min    = Engagement x 500
+        EMV max    = Engagement x 2.000
+
+    `shares` TIDAK ikut: ia hanya terisi di TikTok, jadi memasukkannya membuat
+    EMV Instagram terlihat lebih rendah semata karena platformnya tidak
+    mengirim field itu. Alasan lengkapnya di docstring `emv.py`.
+
+    Post dengan `likes_hidden` (atau `likes < 0`, penanda yang sama di L1)
+    keluar dengan engagement dan EMV `None`: jumlah like-nya tidak diketahui,
+    jadi totalnya tidak diketahui. Ia TIDAK dipaksa jadi nol.
+    """
+    with conn.cursor() as cur:
+        cur.execute(emv_mod.sql_emv_per_post(), {"platform": platform})
+        hasil = [
+            emv_mod.EmvPost(
+                post_id=str(r[0]),
+                social_account_id=str(r[1]) if r[1] is not None else None,
+                platform=r[2],
+                post_date=str(r[3]) if r[3] is not None else None,
+                likes=int(r[4]) if r[4] is not None else None,
+                comments=int(r[5]) if r[5] is not None else None,
+                likes_hidden=bool(r[6]),
+                engagement=int(r[7]) if r[7] is not None else None,
+                emv_min=float(r[8]) if r[8] is not None else None,
+                emv_max=float(r[9]) if r[9] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+    logger.info("EMV per post: %d baris (platform=%r)", len(hasil), platform)
+    return hasil
+
+
+def fetch_emv_per_kol(conn, social_account_id: str | None = None) -> list[EmvKol]:
+    """EMV per akun, dijumlahkan dari post yang engagement-nya terukur.
+
+    Post yang tidak terukur tidak ikut dijumlahkan dan dilaporkan terpisah
+    lewat `post_tak_terukur`, supaya jelas berapa yang ditinggalkan.
+    """
+    with conn.cursor() as cur:
+        cur.execute(emv_mod.sql_emv_per_kol(),
+                    {"social_account_id": social_account_id})
+        hasil = [
+            EmvKol(
+                social_account_id=str(r[0]) if r[0] is not None else None,
+                platform=r[1],
+                post_total=int(r[2]),
+                post_terukur=int(r[3]),
+                post_tak_terukur=int(r[4]),
+                engagement=int(r[5]) if r[5] is not None else None,
+                emv_min=float(r[6]) if r[6] is not None else None,
+                emv_max=float(r[7]) if r[7] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+    logger.info("EMV per KOL: %d baris (social_account_id=%r)",
+                len(hasil), social_account_id)
     return hasil
 
 
