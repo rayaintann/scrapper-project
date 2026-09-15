@@ -39,7 +39,8 @@ from pathlib import Path
 
 from apify_posts import InstagramPostScraper, TikTokVideoScraper
 from apify_runner import FatalApifyError, chunked
-from config import ConfigError, load_config
+from config import ConfigError, default_max_cost_usd, load_config
+from run_lock import jalankan_terkunci
 from db import connect, dedupe_rows, fetch_usernames
 from post_errors import (
     ACTOR_ERROR,
@@ -210,22 +211,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
-    logging.basicConfig(level=logging.INFO, format="%(levelname)-7s | %(message)s")
-    args = parse_args(argv)
+#: Kunci prosedur, DIPISAH PER PLATFORM. Scrape post Instagram dan TikTok
+#: memanggil actor berbeda dengan kuota berbeda, jadi menjalankan keduanya
+#: bersamaan aman -- yang tidak boleh adalah dua run untuk platform yang sama.
+NAMA_KUNCI = "post_pipeline_{platform}"
 
-    try:
-        cfg = load_config()
-    except ConfigError as exc:
-        logger.error("%s", exc)
-        return 1
 
+def _jalankan(args, cfg) -> int:
     platform = args.platform
     started_at = _now()
     run_id = str(uuid.uuid4())
+    # Plafon per run: flag menang, lalu environment, lalu default seukuran uji.
+    # Budget produksi belum diputuskan bisnis, jadi tidak ada angka besar yang
+    # dipasang diam-diam di sini.
+    if args.max_charge_usd is None:
+        args.max_charge_usd = default_max_cost_usd("SCRAPE_MAX_COST_POST_USD", 1.00)
+
     actor = _build_scraper(platform, cfg, args.results, args.max_charge_usd)._actor_id
     if args.from_file:
         actor = f"replay:{args.from_file.name}"
@@ -394,6 +395,32 @@ def main(argv=None) -> int:
             for o in gagal:
                 print(f"  {o.username:24s} {o.status:22s} {(o.message or '')[:70]}")
         return 0
+
+
+def main(argv=None) -> int:
+    """Titik masuk: siapkan env & konfigurasi, lalu jalankan di bawah kunci.
+
+    Kunci dipasang per platform supaya dua Scheduled Task -- satu Instagram,
+    satu TikTok -- tetap bisa berjalan bersamaan, sementara dua eksekusi
+    Instagram yang tumpang tindih ditolak.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)-7s | %(message)s")
+    args = parse_args(argv)
+
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    # dry-run dan --from-file tidak memanggil Apify sama sekali.
+    if args.dry_run or args.from_file:
+        return _jalankan(args, cfg)
+    return jalankan_terkunci(NAMA_KUNCI.format(platform=args.platform),
+                             _jalankan, args, cfg)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,45 @@ PRICE_PER_PROFILE_USD = 0.0026
 # memblokir request dan run selesai tanpa satu pun profil.
 PRICE_PER_TIKTOK_PROFILE_USD = 0.0050
 
+# Harga per FOLLOWER yang diambil, dipakai untuk estimasi sebelum run.
+#
+# Angka ini BUKAN tebakan: docs/PIPELINE_STATUS.md mencatat biaya nyata
+# $3,01 untuk 2.300 follower = $0,001309/follower. Dibulatkan ke atas jadi
+# 0,0013 supaya estimasinya konservatif (lebih baik menahan run yang
+# sebenarnya masih murah daripada meloloskan yang mahal).
+#
+# Bisa ditimpa lewat .env kalau tarif Apify berubah, tanpa mengubah kode.
+PRICE_PER_FOLLOWER_USD = float(os.getenv("PRICE_PER_FOLLOWER_USD") or 0.0013)
+
+
+def default_max_cost_usd(nama_env: str, fallback: float) -> float:
+    """Plafon biaya default untuk satu prosedur, dibaca dari environment.
+
+    KENAPA ADA FALLBACK, DAN KENAPA KECIL
+    =====================================
+    Budget produksi BELUM ditentukan — itu keputusan bisnis, bukan keputusan
+    kode. Jadi angka `fallback` di sini sengaja dipasang sebesar ukuran uji
+    yang wajar, bukan sebesar populasi produksi: kalau seseorang menjalankan
+    scraping tanpa menyetel apa pun, yang terjadi adalah run kecil yang
+    tertahan plafon — bukan tagihan besar yang tidak disengaja.
+
+    Menaikkannya untuk produksi cukup lewat .env / environment Scheduled Task:
+
+        SCRAPE_MAX_COST_PROFILE_USD, SCRAPE_MAX_COST_POST_USD,
+        SCRAPE_MAX_COST_FOLLOWERS_USD
+
+    atau lewat flag `--max-cost-usd` per pemanggilan, yang selalu menang.
+    """
+    raw = os.getenv(nama_env)
+    if raw is None or raw.strip() == "":
+        return fallback
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError(
+            f"{nama_env}={raw!r} bukan angka. Isi dengan USD, misal 1.50."
+        ) from None
+
 
 class ConfigError(RuntimeError):
     """Ada variabel .env yang wajib tapi belum diisi."""

@@ -16,6 +16,7 @@ import csv
 import json
 import logging
 import sys
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,16 @@ from pathlib import Path
 import psycopg2
 
 from apify_ig import BatchResult, FatalApifyError, InstagramProfileScraper, chunked
-from config import PRICE_PER_PROFILE_USD, Config, ConfigError, load_config
+from config import (
+    PRICE_PER_PROFILE_USD,
+    Config,
+    ConfigError,
+    default_max_cost_usd,
+    load_config,
+)
+from post_errors import ACTOR_ERROR, SUCCESS
+from run_lock import jalankan_terkunci
+from scrape_log import AccountOutcome, ScrapeLogger
 from db import ORDER_CLAUSES, connect, dedupe_rows, fetch_instagram_usernames, update_profiles
 from raw_store import RAW_TABLE, insert_profiles
 from transform import extract_username, flatten_for_csv, to_db_update
@@ -99,6 +109,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="folder output (default: output/ atau OUTPUT_DIR di .env)",
+    )
+    parser.add_argument(
+        "--no-log",
+        action="store_true",
+        help="jangan menulis ke public.scheduler_logs",
     )
     parser.add_argument(
         "--log-level",
@@ -178,10 +193,21 @@ def write_outputs(
     return paths
 
 
+#: Dipakai `scheduler_logs.job_name` / `.category`, dan sebagai nama kunci
+#: prosedur. Instagram dan TikTok punya kunci sendiri-sendiri: keduanya
+#: memanggil actor yang berbeda dan boleh berjalan bersamaan.
+JOB_NAME = "profile_scrape"
+CATEGORY = "profile"
+NAMA_KUNCI = "pipeline_instagram_profile"
+
+
 def run(args: argparse.Namespace, cfg: Config) -> int:
     limit = max(1, min(args.limit, MAX_LIMIT))
     if args.limit > MAX_LIMIT:
         logger.warning("--limit dibatasi ke %d", MAX_LIMIT)
+
+    run_id = str(uuid.uuid4())
+    mulai = datetime.now(timezone.utc)
 
     with connect(cfg.postgres) as conn:
         rows = fetch_instagram_usernames(
@@ -208,8 +234,12 @@ def run(args: argparse.Namespace, cfg: Config) -> int:
             return 1
 
         if args.max_cost_usd is None:
-            # Beri kelonggaran 1.5x supaya batch normal tidak terpotong plafon.
-            max_charge = round(args.batch_size * PRICE_PER_PROFILE_USD * 1.5, 4)
+            # Plafon per batch. Environment menang atas rumus bawaan supaya
+            # Scheduled Task bisa menyetelnya tanpa mengubah kode; kalau
+            # environment kosong, tetap pakai 1.5x estimasi satu batch supaya
+            # batch normal tidak terpotong plafonnya sendiri.
+            bawaan = round(args.batch_size * PRICE_PER_PROFILE_USD * 1.5, 4)
+            max_charge = default_max_cost_usd("SCRAPE_MAX_COST_PROFILE_USD", bawaan)
         else:
             max_charge = args.max_cost_usd or None
 
@@ -285,6 +315,45 @@ def run(args: argparse.Namespace, cfg: Config) -> int:
         success = sum(1 for u in updates if u["scrape_status"] == "success")
         failed = len(updates) - success
         failed_batches = [b.batch_index for b in batches if not b.ok]
+
+        # --- jejak ke public.scheduler_logs ---------------------------------
+        # Tabel yang SAMA dengan post_pipeline dan scheduler_engine; yang
+        # membedakan hanya job_name/category. Tidak ada mekanisme logging baru.
+        #
+        # Tanpa ini, eksekusi terjadwal tidak meninggalkan jejak apa pun di
+        # database: satu-satunya bukti keberhasilannya adalah stdout Task
+        # Scheduler, yang ditimpa tiap run.
+        if not args.no_log:
+            try:
+                with ScrapeLogger(cfg.postgres, run_id=run_id,
+                                  job_name=JOB_NAME,
+                                  category=CATEGORY) as slog:
+                    for key, directory_rows in grouped.items():
+                        item = items_by_username.get(key)
+                        for row in directory_rows:
+                            ok = item is not None and to_db_update(
+                                row.id, item)["scrape_status"] == "success"
+                            slog.log_account(AccountOutcome(
+                                username=key,
+                                platform="instagram",
+                                status=SUCCESS if ok else ACTOR_ERROR,
+                                kol_directory_id=row.id,
+                                records=1 if ok else 0,
+                                message=None if ok else (
+                                    "tidak ada item balasan" if item is None
+                                    else str(item.get("error") or "tidak_diketahui")),
+                                started_at=mulai,
+                                finished_at=datetime.now(timezone.utc),
+                            ))
+                    if aborted:
+                        slog.log_run(platform="instagram", status=ACTOR_ERROR,
+                                     records=0, message=aborted,
+                                     started_at=mulai,
+                                     finished_at=datetime.now(timezone.utc))
+            except Exception as exc:  # noqa: BLE001
+                # Log tidak boleh menjatuhkan pipeline yang scraping-nya sudah
+                # dibayar. Sama seperti kebijakan di ScrapeLogger sendiri.
+                logger.warning("Gagal menulis scheduler_logs: %s", exc)
 
         # Scraping sudah dibayar di titik ini. Kegagalan menulis ke DB tidak boleh
         # muncul sebagai traceback mentah — file hasilnya sudah aman di disk dan
@@ -370,7 +439,11 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         logger.error("%s", exc)
         return 1
-    return run(args, cfg)
+    # dry-run tidak memanggil actor dan tidak menulis apa pun, jadi tidak perlu
+    # antre di belakang run yang sedang berjalan.
+    if args.dry_run:
+        return run(args, cfg)
+    return jalankan_terkunci(NAMA_KUNCI, run, args, cfg)
 
 
 if __name__ == "__main__":

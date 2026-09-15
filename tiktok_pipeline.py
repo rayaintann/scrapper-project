@@ -41,7 +41,17 @@ import psycopg2
 
 from apify_runner import BatchResult, FatalApifyError, chunked
 from apify_tiktok import TikTokProfileScraper
-from config import PRICE_PER_TIKTOK_PROFILE_USD, Config, ConfigError, PostgresConfig, load_config
+from config import (
+    PRICE_PER_TIKTOK_PROFILE_USD,
+    Config,
+    ConfigError,
+    PostgresConfig,
+    default_max_cost_usd,
+    load_config,
+)
+from post_errors import ACTOR_ERROR, SUCCESS
+from run_lock import jalankan_terkunci
+from scrape_log import AccountOutcome, ScrapeLogger
 from db import ORDER_CLAUSES, connect, dedupe_rows, fetch_usernames, open_connection
 from tiktok_transform import flatten_for_csv
 from transform import normalize_username
@@ -86,6 +96,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="plafon biaya seluruh run; sisa batch dibatalkan "
                              "begitu terlampaui")
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--no-log", action="store_true",
+                        help="jangan menulis ke public.scheduler_logs")
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args(argv)
 
@@ -301,6 +313,14 @@ def write_outputs(output_dir: Path, stamp: str, batches: list[BatchResult],
     return paths
 
 
+#: `scheduler_logs.job_name`/`.category` dan nama kunci prosedur. Kunci TikTok
+#: berbeda dari kunci Instagram: keduanya memanggil actor berbeda dengan kuota
+#: berbeda, jadi menjalankannya bersamaan justru diinginkan.
+JOB_NAME = "profile_scrape"
+CATEGORY = "profile"
+NAMA_KUNCI = "pipeline_tiktok_profile"
+
+
 def run(args: argparse.Namespace, cfg: Config) -> int:
     # Koneksi ini hanya untuk memilih kandidat, lalu ditutup. Loop scraping bisa
     # berjam-jam, dan koneksi menganggur selama itu tidak bisa dipercaya.
@@ -366,7 +386,8 @@ def run(args: argparse.Namespace, cfg: Config) -> int:
     logger.info("Total %d batch (batch size %d), proxy=%s",
                 len(chunks), args.batch_size, cfg.tiktok.proxy_country)
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    mulai = datetime.now(timezone.utc)
+    stamp = mulai.strftime("%Y%m%dT%H%M%SZ")
     output_dir = args.output_dir or cfg.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_path = output_dir / f"tiktok_profiles_{stamp}.jsonl"
@@ -378,6 +399,11 @@ def run(args: argparse.Namespace, cfg: Config) -> int:
     # tengah tidak menghanguskan profil yang sudah dibayar.
     aborted: str | None = None
     biaya = 0.0
+    # Plafon TOTAL satu eksekusi. Flag menang; kalau kosong, environment;
+    # kalau environment juga kosong, plafon seukuran uji (bukan produksi) --
+    # budget produksi masih menunggu keputusan bisnis.
+    plafon_total = (args.max_total_cost_usd if args.max_total_cost_usd is not None
+                    else default_max_cost_usd("SCRAPE_MAX_COST_PROFILE_USD", 1.00))
     try:
         with raw_path.open("w", encoding="utf-8") as raw_file:
             for index, chunk in enumerate(chunks, start=1):
@@ -406,8 +432,8 @@ def run(args: argparse.Namespace, cfg: Config) -> int:
                 logger.info("Progress: batch %d/%d selesai, total item %d, biaya $%.4f",
                             index, len(chunks), len(all_items), biaya)
 
-                if args.max_total_cost_usd and biaya >= args.max_total_cost_usd:
-                    aborted = (f"plafon biaya total ${args.max_total_cost_usd:.2f} tercapai "
+                if plafon_total and biaya >= plafon_total:
+                    aborted = (f"plafon biaya total ${plafon_total:.2f} tercapai "
                                f"(terpakai ${biaya:.4f})")
                     logger.error("%s; sisa batch dibatalkan.", aborted)
                     break
@@ -430,6 +456,37 @@ def run(args: argparse.Namespace, cfg: Config) -> int:
     for b in batches:
         if b.partial:
             alasan["batch_sebagian"] += 1
+
+    # --- jejak ke public.scheduler_logs -------------------------------------
+    # Tabel yang SAMA dengan post_pipeline / scheduler_engine / pipeline.py,
+    # dibedakan lewat job_name. `tidak_kembali` adalah daftar username yang
+    # dikirim tapi tidak dikembalikan actor -- untuk TikTok itu biasanya
+    # berarti diblokir platform, bukan akunnya tidak ada, jadi tetap dicatat
+    # sebagai kegagalan yang bisa ditindak, bukan dihilangkan.
+    if not args.no_log:
+        try:
+            gagal = set(tidak_kembali)
+            with ScrapeLogger(cfg.postgres,
+                              run_id=writer.scrape_run_id if writer else None,
+                              job_name=JOB_NAME, category=CATEGORY) as slog:
+                for u in usernames:
+                    ok = u not in gagal
+                    slog.log_account(AccountOutcome(
+                        username=u,
+                        platform="tiktok",
+                        status=SUCCESS if ok else ACTOR_ERROR,
+                        records=1 if ok else 0,
+                        message=None if ok else
+                                "tidak ada item dari actor (kemungkinan diblokir platform)",
+                        started_at=mulai,
+                        finished_at=datetime.now(timezone.utc),
+                    ))
+                if aborted:
+                    slog.log_run(platform="tiktok", status=ACTOR_ERROR, records=0,
+                                 message=aborted, started_at=mulai,
+                                 finished_at=datetime.now(timezone.utc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Gagal menulis scheduler_logs: %s", exc)
 
     print("\n=== Ringkasan TikTok ===")
     print(f"Username dikirim   : {len(usernames)}")
@@ -481,7 +538,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("%s", exc)
         return 1
     try:
-        return run(args, cfg)
+        # dry-run tidak memanggil actor, jadi tidak perlu antre di belakang
+        # run yang sedang berjalan.
+        if args.dry_run:
+            return run(args, cfg)
+        return jalankan_terkunci(NAMA_KUNCI, run, args, cfg)
     except FileNotFoundError as exc:
         logger.error("%s", exc)
         return 1
