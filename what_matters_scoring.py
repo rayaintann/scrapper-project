@@ -1,4 +1,4 @@
-"""What Matters Most — 7 kriteria ranking, SATU definisi, dua bentuk.
+"""What Matters Most — 6 kriteria ranking, SATU definisi, dua bentuk.
 
 ============================================================================
 APA INI
@@ -30,10 +30,10 @@ angka yang bukan yang mereka kira.
 `SIFAT` di bawah merekamnya per kriteria, dan API wajib meneruskannya.
 
 ============================================================================
-DUA KRITERIA SENGAJA MENGEMBALIKAN NULL
+SATU KRITERIA SENGAJA MENGEMBALIKAN NULL
 ============================================================================
 
-`content_quality` dan `brand_safety` TIDAK dihitung. Bukan karena lupa.
+`content_quality` TIDAK dihitung. Bukan karena lupa.
 
 CONTENT QUALITY. Bobot yang diusulkan: engagement 40%, content format 30%,
 content topic 30%. Audit atas data nyata:
@@ -50,20 +50,12 @@ Yang tersisa cuma engagement 40% -- dan itu sudah menjadi kriteria #1. Memakai
 ulang sinyal yang sama dengan nama lain akan membuatnya dihitung dua kali di
 rata-rata What Matters. Jadi NULL, bukan angka setengah jadi.
 
-BRAND SAFETY. Bobot yang diusulkan: authenticity 50%, topic safety 30%, data
-quality 20%. Audit:
+BRAND SAFETY DIHAPUS DARI SCOPE. Keputusan terbaru: Brand Safety tidak lagi
+menjadi bagian Brand Match maupun What Matters. Kriterianya tidak terdaftar
+di `KRITERIA`, jadi `?matters=brand_safety` diabaikan `parse_matters` seperti
+kunci tak dikenal lainnya -- tidak ada skor, proxy, atau default pengganti.
 
-    authenticity     ADA -- feature.*_audience_analysis.authenticity_score
-    topic safety     TIDAK ADA -- tidak ada taksonomi aman/tidak aman untuk
-                     ke-11 topik; `*_comments_analysis` (toxicity, sentiment)
-                     0 baris
-    data quality     TIDAK ADA definisinya sebagai komponen brand safety
-
-Setengah bobotnya tanpa sumber. Kalau sisanya dinormalisasi, hasilnya persis
-sama dengan `authenticity_score` -- satu angka, dua nama, dan yang kedua
-menjanjikan jaminan keamanan merek yang tidak diberikannya.
-
-Keduanya tetap terdaftar di `KRITERIA` supaya UI bisa menampilkannya
+`content_quality` tetap terdaftar di `KRITERIA` supaya UI bisa menampilkannya
 NONAKTIF beserta alasannya, bukan menyembunyikannya.
 
 ============================================================================
@@ -99,7 +91,7 @@ SKALA_MAX = 100.0
 # 1. KRITERIA  --  kunci API, nama, sumber, sifat
 # ===========================================================================
 #
-# `kunci` adalah yang dikirim UI:  ?matters=engagement,consistency,brand_safety
+# `kunci` adalah yang dikirim UI:  ?matters=engagement,consistency,reach
 
 KRITERIA: dict[str, dict] = {
     "engagement": {
@@ -151,20 +143,11 @@ KRITERIA: dict[str, dict] = {
         "catatan": "Selalu NULL. format_dominant dan content_topic tidak "
                    "punya urutan kualitas yang bisa dipertanggungjawabkan.",
     },
-    "brand_safety": {
-        "nama": "Brand Safety",
-        "skor": "brand_safety_score",
-        "sifat": TIDAK_TERSEDIA,
-        "sumber": (),
-        "catatan": "Selalu NULL. Topic safety dan data quality tidak punya "
-                   "sumber; authenticity sendirian hanya menduplikasi "
-                   "kriteria audience_quality dengan nama yang menyesatkan.",
-    },
 }
 
 #: Urutan tampil di UI.
 URUTAN_KRITERIA = ("engagement", "audience_quality", "consistency",
-                   "community", "reach", "content_quality", "brand_safety")
+                   "community", "reach", "content_quality")
 
 #: Kriteria yang benar-benar mengembalikan angka hari ini.
 KRITERIA_AKTIF = tuple(k for k in URUTAN_KRITERIA
@@ -349,11 +332,6 @@ def content_quality_score(*_args, **_kwargs) -> None:
     return None
 
 
-def brand_safety_score(*_args, **_kwargs) -> None:
-    """Kriteria 7 -- TIDAK TERSEDIA. Selalu None. Lihat docstring modul."""
-    return None
-
-
 # ===========================================================================
 # 5. WHAT MATTERS SCORE
 # ===========================================================================
@@ -379,7 +357,7 @@ def what_matters_score(skor: dict[str, float | None],
 
 
 def parse_matters(param: str | None) -> list[str]:
-    """`"engagement,consistency,brand_safety"` -> daftar kunci yang sah.
+    """`"engagement,consistency,reach"` -> daftar kunci yang sah.
 
     Kunci tak dikenal diabaikan, bukan membuat request gagal: UI yang lebih
     baru boleh mengirim kriteria yang backend ini belum kenal.
@@ -475,9 +453,8 @@ def sql_ekspresi_skor(kolom: dict[str, str] | None = None) -> dict[str, str]:
     LIMIT. Menghitung persentil atas satu halaman akan memberi peringkat yang
     artinya berubah-ubah tiap kali orang menggeser halaman.
 
-    Kriteria `content_quality` dan `brand_safety` sengaja `NULL::numeric`:
-    keduanya belum punya sumber, dan itu bukan sesuatu yang boleh ditambal di
-    jalur baca.
+    Kriteria `content_quality` sengaja `NULL::numeric`: ia belum punya
+    sumber, dan itu bukan sesuatu yang boleh ditambal di jalur baca.
     """
     c = {**KOLOM_SUMBER_DEFAULT, **(kolom or {})}
     er = sql_persentil(c["engagement_rate"])
@@ -501,7 +478,6 @@ def sql_ekspresi_skor(kolom: dict[str, str] | None = None) -> dict[str, str]:
         ),
         "reach": sql_persentil(c["median_views"]),
         "content_quality": "NULL::numeric",
-        "brand_safety": "NULL::numeric",
     }
 
 

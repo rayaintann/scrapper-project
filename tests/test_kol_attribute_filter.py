@@ -282,9 +282,15 @@ def test_db_master_taxonomy_utuh_40_baris(conn):
 
 @pytest.mark.needs_db
 def test_db_kol_categories_tidak_tersentuh(conn):
-    """Taxonomy Category terpisah dan tidak boleh berubah."""
+    """Taxonomy Category terpisah dan tidak boleh berubah.
+
+    Migration 047 menambah 6 Parent Category + 42 Sub Category; 28 kategori
+    existing (level category, di luar 6 kode induk baru) tetap utuh."""
     with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM public.kol_categories")
+        cur.execute("""SELECT count(*) FROM public.kol_categories
+                        WHERE level = 'category'
+                          AND (code IS NULL OR code NOT IN
+                               ('TEC','FIN','EDU','PAR','AUT','HNL'))""")
         assert cur.fetchone()[0] == 28
 
 

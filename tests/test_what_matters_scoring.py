@@ -34,12 +34,12 @@ POP_VIEWS = [679, 10_000, 344_739, 638_034, 136_309_208]
 
 
 # ===========================================================================
-# 1. MAPPING KETUJUH KRITERIA
+# 1. MAPPING KEENAM KRITERIA
 # ===========================================================================
 
-def test_tepat_tujuh_kriteria():
-    assert len(w.KRITERIA) == 7
-    assert len(w.URUTAN_KRITERIA) == 7
+def test_tepat_enam_kriteria():
+    assert len(w.KRITERIA) == 6
+    assert len(w.URUTAN_KRITERIA) == 6
     assert set(w.URUTAN_KRITERIA) == set(w.KRITERIA)
 
 
@@ -50,7 +50,6 @@ def test_tepat_tujuh_kriteria():
     ("community", "Strong Company/Community"),
     ("reach", "High Reach"),
     ("content_quality", "Content Quality"),
-    ("brand_safety", "Brand Safety"),
 ])
 def test_mapping_kunci_ke_nama(kunci, nama):
     assert w.KRITERIA[kunci]["nama"] == nama
@@ -64,8 +63,8 @@ def test_setiap_kriteria_punya_sifat_dan_catatan():
 
 
 def test_parse_matters_dari_query_param():
-    assert w.parse_matters("engagement,consistency,brand_safety") == [
-        "engagement", "consistency", "brand_safety"]
+    assert w.parse_matters("engagement,consistency,reach") == [
+        "engagement", "consistency", "reach"]
 
 
 def test_parse_matters_mengabaikan_kunci_asing_dan_duplikat():
@@ -333,33 +332,42 @@ def test_content_quality_tidak_memberi_skor_karena_field_terisi():
 
 
 # ===========================================================================
-# 11. BRAND SAFETY  --  tidak memakai sentiment palsu
+# 11. BRAND SAFETY  --  DIHAPUS DARI SCOPE What Matters
 # ===========================================================================
 
-def test_brand_safety_selalu_null():
-    assert w.brand_safety_score() is None
-    assert w.brand_safety_score(100, "food", 90) is None
+def test_brand_safety_tidak_lagi_jadi_kriteria():
+    assert "brand_safety" not in w.KRITERIA
+    assert "brand_safety" not in w.URUTAN_KRITERIA
+    assert not hasattr(w, "brand_safety_score")
 
 
-def test_brand_safety_ditandai_tidak_tersedia():
-    assert w.KRITERIA["brand_safety"]["sifat"] == w.TIDAK_TERSEDIA
-    assert w.KRITERIA["brand_safety"]["sumber"] == ()
+def test_brand_safety_dari_ui_lama_diabaikan():
+    """UI lama yang masih mengirim `brand_safety` tidak membuat request gagal
+    dan tidak mendapat skor pengganti."""
+    assert w.parse_matters("engagement,brand_safety") == ["engagement"]
+    assert w.parse_matters("brand_safety") == []
 
 
-def test_brand_safety_tidak_membuat_sentiment_baru():
+def test_tidak_ada_proxy_brand_safety_atau_sentiment_baru():
     sumber_modul = (AKAR / "what_matters_scoring.py").read_text(encoding="utf-8")
     kode = "\n".join(b for b in sumber_modul.splitlines()
                      if not b.lstrip().startswith("#"))
-    for dilarang in ("def sentiment", "def toxicity", "SENTIMENT_", "TOXICITY_"):
+    for dilarang in ("def sentiment", "def toxicity", "SENTIMENT_", "TOXICITY_",
+                     "def brand_safety", "competitor_saturation",
+                     "risk_multiplier"):
         assert dilarang not in kode
 
 
-def test_dua_kriteria_tidak_tersedia_tetap_terdaftar():
+def test_modul_brand_safety_tidak_ada():
+    assert not (AKAR / "brand_safety_scoring.py").exists()
+
+
+def test_kriteria_tidak_tersedia_tetap_terdaftar():
     """Supaya UI bisa menampilkannya nonaktif dengan alasannya, bukan
     menyembunyikannya."""
     tidak_aktif = [k for k in w.URUTAN_KRITERIA
                    if w.KRITERIA[k]["sifat"] == w.TIDAK_TERSEDIA]
-    assert tidak_aktif == ["content_quality", "brand_safety"]
+    assert tidak_aktif == ["content_quality"]
     assert len(w.KRITERIA_AKTIF) == 5
 
 
@@ -368,9 +376,9 @@ def test_dua_kriteria_tidak_tersedia_tetap_terdaftar():
 # ===========================================================================
 
 def test_what_matters_rata_rata_kriteria_terpilih():
-    skor = {"engagement": 85.0, "consistency": 72.0, "brand_safety": 90.0}
+    skor = {"engagement": 85.0, "consistency": 72.0, "reach": 90.0}
     hasil = w.what_matters_score(
-        skor, ["engagement", "consistency", "brand_safety"])
+        skor, ["engagement", "consistency", "reach"])
     assert round(hasil, 2) == 82.33
 
 
@@ -407,11 +415,10 @@ def test_tidak_memilih_kriteria_hasilnya_null():
 
 
 def test_kriteria_tidak_tersedia_selalu_keluar_dari_penyebut():
-    """content_quality dan brand_safety selalu NULL, jadi memilih keduanya
-    tidak boleh menurunkan skor."""
-    skor = {"engagement": 90.0, "content_quality": None, "brand_safety": None}
-    hasil = w.what_matters_score(
-        skor, ["engagement", "content_quality", "brand_safety"])
+    """content_quality selalu NULL, jadi memilihnya tidak boleh menurunkan
+    skor."""
+    skor = {"engagement": 90.0, "content_quality": None}
+    hasil = w.what_matters_score(skor, ["engagement", "content_quality"])
     assert hasil == 90.0
 
 
@@ -519,11 +526,9 @@ def test_sql_rata_rata_memakai_nullif_pada_penyebut():
 
 def test_sql_what_matters_mengeluarkan_kriteria_tidak_tersedia():
     kolom = {k: k + "_col" for k in w.KRITERIA}
-    sql = w.sql_what_matters(
-        ["engagement", "content_quality", "brand_safety"], kolom)
+    sql = w.sql_what_matters(["engagement", "content_quality"], kolom)
     assert "engagement_col" in sql
     assert "content_quality_col" not in sql
-    assert "brand_safety_col" not in sql
 
 
 def test_sql_what_matters_tanpa_kriteria_valid_jadi_null():

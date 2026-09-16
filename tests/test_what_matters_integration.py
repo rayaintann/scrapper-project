@@ -110,16 +110,14 @@ def test_persentil_sql_mengecualikan_null_dari_penyebut():
 
 def test_kriteria_tidak_tersedia_tidak_masuk_penyebut():
     ekspresi = w.sql_ekspresi_skor()
-    sql = w.sql_what_matters(["engagement", "content_quality", "brand_safety"],
-                             ekspresi)
+    sql = w.sql_what_matters(["engagement", "content_quality"], ekspresi)
     assert "percent_rank" in sql
     assert "NULL::numeric" not in sql
 
 
 def test_hanya_kriteria_tidak_tersedia_menghasilkan_null():
     ekspresi = w.sql_ekspresi_skor()
-    assert w.sql_what_matters(["content_quality", "brand_safety"],
-                              ekspresi) == "NULL"
+    assert w.sql_what_matters(["content_quality"], ekspresi) == "NULL"
 
 
 def test_jumlah_kontributor_menghitung_yang_tidak_null():
@@ -157,10 +155,13 @@ def test_tidak_ada_konstanta_mock_di_query():
         assert mock not in sql
 
 
-def test_content_quality_dan_brand_safety_tetap_null_di_sql():
+def test_content_quality_tetap_null_di_sql():
     ekspresi = w.sql_ekspresi_skor()
     assert ekspresi["content_quality"] == "NULL::numeric"
-    assert ekspresi["brand_safety"] == "NULL::numeric"
+
+
+def test_brand_safety_tidak_ada_di_jalur_sql():
+    assert "brand_safety" not in w.sql_ekspresi_skor()
 
 
 # ===========================================================================
@@ -255,7 +256,7 @@ def test_db_kontributor_terisi_saat_ada_skor(conn):
 @pytest.mark.needs_db
 def test_db_kriteria_tidak_tersedia_semua_null(conn):
     hasil = db.search_kol_directory(
-        conn, matters="content_quality,brand_safety", limit=5)
+        conn, matters="content_quality", limit=5)
     assert hasil
     for r in hasil:
         assert r.what_matters_score is None
