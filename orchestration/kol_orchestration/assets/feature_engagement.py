@@ -403,10 +403,15 @@ _SHARE_RATE = f"round({_SHARE_N}::numeric / NULLIF({_SHARE_D}, 0) * 100, 4)"
 # NULL kalau rentangnya nol hari -- satu post, atau semua post di hari yang
 # sama, tidak menentukan frekuensi apa pun. Menyebutnya "N post/bulan" dari
 # satu titik adalah mengarang.
+#
+# Tanggal diambil dalam WIB (Asia/Jakarta), sama seperti post_date di L2.
+# `posted_at::date` mengikuti TimeZone sesi (Etc/UTC di DB kol), sehingga post
+# yang tayang pagi WIB jatuh ke hari sebelumnya dan rentangnya melebar.
 _S_FREQ = "lolos AND posted_at IS NOT NULL"
 _FREQ_N = f"count(*) FILTER (WHERE {_S_FREQ})"
-_OBS_DAYS = f"""(max(posted_at) FILTER (WHERE {_S_FREQ})::date
-                 - min(posted_at) FILTER (WHERE {_S_FREQ})::date)"""
+_TGL_WIB = "(posted_at AT TIME ZONE 'Asia/Jakarta')::date"
+_OBS_DAYS = f"""(max({_TGL_WIB}) FILTER (WHERE {_S_FREQ})
+                 - min({_TGL_WIB}) FILTER (WHERE {_S_FREQ}))"""
 _POST_FREQ = f"round({_FREQ_N}::numeric / NULLIF({_OBS_DAYS}, 0) * 30, 2)"
 
 #: Sembilan ekspresi, satu daftar, dipakai apa adanya di kedua platform.

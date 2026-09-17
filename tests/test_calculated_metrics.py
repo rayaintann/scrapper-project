@@ -267,6 +267,32 @@ def test_frekuensi_semua_di_hari_yang_sama_null(conn):
     assert h["post_frequency_monthly"] is None
 
 
+def test_frekuensi_hari_dihitung_dalam_wib(conn):
+    """Dua post di hari WIB yang sama tapi beda hari UTC -> rentang 0, NULL.
+
+    01:00 WIB = 18:00 UTC hari sebelumnya. Kalau tanggal diambil dari sesi
+    UTC, rentangnya jadi 1 hari dan frekuensinya dikarang.
+    """
+    baris = [P(posted_at="2026-01-05 01:00:00+07"),
+             P(posted_at="2026-01-05 20:00:00+07")]
+    h = hitung(conn, baris)
+    assert h["observation_days"] == 0
+    assert h["post_frequency_monthly"] is None
+
+
+def test_frekuensi_kasus_iben_ma_wib(conn):
+    """Sampel audit 17 Sep 2026: 8 post, 12 Agu 23:51 UTC .. 19 Agu 02:06 UTC.
+
+    WIB: 13 Agu .. 19 Agu = 6 hari -> 8/6*30 = 40,00 (UTC memberi 7 hari, 34,29).
+    """
+    baris = [P(posted_at="2026-08-12 23:51:50+00")]
+    baris += [P(posted_at="2026-08-15 10:00:00+00") for _ in range(6)]
+    baris += [P(posted_at="2026-08-19 02:06:09+00")]
+    h = hitung(conn, baris)
+    assert h["freq_n"] == 8 and h["observation_days"] == 6
+    assert float(h["post_frequency_monthly"]) == pytest.approx(40.00, abs=0.001)
+
+
 def test_frekuensi_tanpa_post_null(conn):
     h = hitung(conn, [P(lolos=False)])
     assert h["freq_n"] == 0

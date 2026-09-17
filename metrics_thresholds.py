@@ -55,8 +55,8 @@ from __future__ import annotations
 # ===========================================================================
 # 1. GROWTH CLASSIFICATION  <- l2_gold.kol_profile_card.followers_growth (%)
 # ===========================================================================
-# > 10%        High Growth
-# 5% .. 10%    Medium Growth      (10 tepat masuk Medium: High-nya STRIKTLY >)
+# >= 10%       High Growth        (10 tepat masuk High, sesuai spesifikasi)
+# 5% .. < 10%  Medium Growth
 # 0% .. < 5%   Low Growth
 # < 0%         Negative Growth
 GROWTH_HIGH_MIN = 10.0
@@ -73,7 +73,7 @@ def klasifikasi_growth(growth_pct: float | None) -> str | None:
     """Label pertumbuhan dari Growth %, atau None kalau belum bisa dihitung."""
     if growth_pct is None:
         return None
-    if growth_pct > GROWTH_HIGH_MIN:
+    if growth_pct >= GROWTH_HIGH_MIN:
         return GROWTH_HIGH
     if growth_pct >= GROWTH_MEDIUM_MIN:
         return GROWTH_MEDIUM
@@ -85,7 +85,7 @@ def klasifikasi_growth(growth_pct: float | None) -> str | None:
 def sql_growth_class(kolom: str = "followers_growth") -> str:
     return f"""CASE
         WHEN {kolom} IS NULL                    THEN NULL
-        WHEN {kolom} >  {GROWTH_HIGH_MIN}       THEN '{GROWTH_HIGH}'
+        WHEN {kolom} >= {GROWTH_HIGH_MIN}       THEN '{GROWTH_HIGH}'
         WHEN {kolom} >= {GROWTH_MEDIUM_MIN}     THEN '{GROWTH_MEDIUM}'
         WHEN {kolom} >= {GROWTH_LOW_MIN}        THEN '{GROWTH_LOW}'
         ELSE '{GROWTH_NEGATIVE}'
@@ -215,7 +215,7 @@ NILAI_TINGKAT = (TINGKAT_HIGH, TINGKAT_MEDIUM, TINGKAT_LOW)
 #: Ringkasan seluruh ambang, untuk dilaporkan di metadata asset supaya nilai
 #: yang BENAR-BENAR dipakai satu run terlihat tanpa membuka kode.
 RINGKASAN_AMBANG = {
-    "growth_class": f">{GROWTH_HIGH_MIN} High / >={GROWTH_MEDIUM_MIN} Medium / "
+    "growth_class": f">={GROWTH_HIGH_MIN} High / >={GROWTH_MEDIUM_MIN} Medium / "
                     f">={GROWTH_LOW_MIN} Low / sisanya Negative",
     "gender_reliability": f">={GENDER_HIGH_MIN} High / >={GENDER_MEDIUM_MIN} Medium / sisanya Low",
     "post_frequency_reliability":

@@ -91,7 +91,16 @@ KEPUTUSAN DESAIN — post_metric
      avg_watch_time_seconds     `feature.*_post_analysis` 0/186 dan 0/291
      completion_rate            `feature.tt_post_analysis` 0/291
 
-7. UPSERT DENGAN PENJAGA `IS DISTINCT FROM`, bukan TRUNCATE + INSERT.
+7. LIKE TERSEMBUNYI DISIMPAN NULL, BUKAN -1.
+   Instagram melaporkan like yang disembunyikan sebagai -1. Menyalinnya membuat
+   `likes` bernilai negatif dan `engagement_owned` = comments - 1. Untuk post
+   ber-`likes_hidden` (atau `likes < 0`): `likes`, `engagement_owned`, dan
+   `engagement_public` NULL -- engagement-nya memang tidak diketahui, sama
+   seperti `emv_min` / `emv_max` (migrasi 046). Penandanya tetap di
+   `likes_hidden`. L1 menormalkan hal yang sama sejak migrasi 049; guard di
+   sini tetap ada supaya L2 benar walau L1 belum di-rebuild.
+
+8. UPSERT DENGAN PENJAGA `IS DISTINCT FROM`, bukan TRUNCATE + INSERT.
    Sama seperti seluruh asset L2 lain: baris yang isinya tidak berubah tidak
    ditulis ulang, jadi `updated_at` menandai perubahan sungguhan dan rerun
    benar-benar idempoten.
@@ -166,7 +175,13 @@ _CTE_POST = """
                u.permalink,
                u.likes_hidden,
                u.is_collaboration,
-               u.likes, u.comments, u.shares, u.saved AS saves, u.views,
+               -- like tersembunyi (sentinel -1) -> NULL, lihat butir 7
+               COALESCE(u.likes_hidden, false) OR COALESCE(u.likes < 0, false)
+                                                                AS like_tersembunyi,
+               CASE WHEN u.likes_hidden IS TRUE OR u.likes < 0 THEN NULL
+                    ELSE u.likes
+               END                                              AS likes,
+               u.comments, u.shares, u.saved AS saves, u.views,
                -- aturan sampel yang sama dengan kol_metric_daily; di sini
                -- dipakai HANYA untuk er_followers, bukan untuk membuang baris
                (u.likes_hidden IS NOT TRUE
@@ -218,9 +233,15 @@ _CTE_POST = """
                -- DEFINISI BISNIS: Like + Comment + Share. Save TIDAK ikut
                -- (lihat butir 3 di docstring). Komponen NULL dianggap 0 —
                -- di sini aman karena likes & comments terisi 477/477.
-               COALESCE(d.likes, 0) + COALESCE(d.comments, 0)
-                                    + COALESCE(d.shares, 0)     AS engagement_owned,
-               COALESCE(d.likes, 0) + COALESCE(d.comments, 0)   AS engagement_public
+               -- Kecuali like tersembunyi: engagement-nya tidak diketahui,
+               -- jadi NULL, bukan comments saja (butir 7).
+               CASE WHEN d.like_tersembunyi THEN NULL
+                    ELSE COALESCE(d.likes, 0) + COALESCE(d.comments, 0)
+                                             + COALESCE(d.shares, 0)
+               END                                              AS engagement_owned,
+               CASE WHEN d.like_tersembunyi THEN NULL
+                    ELSE COALESCE(d.likes, 0) + COALESCE(d.comments, 0)
+               END                                              AS engagement_public
         FROM dengan_follower d
     )"""
 

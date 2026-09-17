@@ -59,7 +59,8 @@ def _sql_satu(conn, ekspresi: str, **nilai) -> str | None:
 @pytest.mark.parametrize("growth, harapan", [
     (30.0, mt.GROWTH_HIGH),        # contoh requirement: 100 -> 130 = 30%
     (10.01, mt.GROWTH_HIGH),
-    (10.0, mt.GROWTH_MEDIUM),      # batas: 10 tepat MASUK Medium, High-nya > 10
+    (10.0, mt.GROWTH_HIGH),        # batas: 10 tepat MASUK High (>= 10)
+    (9.99, mt.GROWTH_MEDIUM),
     (7.5, mt.GROWTH_MEDIUM),
     (5.0, mt.GROWTH_MEDIUM),       # batas bawah Medium
     (4.99, mt.GROWTH_LOW),
