@@ -11,7 +11,7 @@ Yang dijaga test ini, berurutan sesuai daftar wajib:
      7  High Reach tidak memakai estimated_reach
      8  High Reach memakai views sebagai proxy
      9  Community berlabel PROXY
-    10  Content Quality tidak menghasilkan mock score
+    10  Content Quality = Engagement 50 + Views 30 + Consistency 20
     11  Brand Safety tidak memakai fake sentiment
     12  What Matters Score = rata-rata kriteria terpilih
     13  kriteria NULL keluar dari penyebut
@@ -312,23 +312,132 @@ def test_community_keduanya_null_jadi_null():
 
 
 # ===========================================================================
-# 10. CONTENT QUALITY  --  tidak boleh menghasilkan mock score
+# 10. CONTENT QUALITY  --  Engagement 50% + Views 30% + Consistency 20%
 # ===========================================================================
-
-def test_content_quality_selalu_null():
-    assert w.content_quality_score() is None
-    assert w.content_quality_score("Carousel", "food", 5.0) is None
-
-
-def test_content_quality_ditandai_tidak_tersedia():
-    assert w.KRITERIA["content_quality"]["sifat"] == w.TIDAK_TERSEDIA
-    assert w.KRITERIA["content_quality"]["sumber"] == ()
+# Populasi kecil yang angkanya bisa dihitung tangan. persentil_ke_skor:
+# (jumlah populasi yang lebih kecil, dibatasi n-1) / (n-1) x 100.
+POP_ER_CQ = [0.5, 1.0, 2.0, 4.0]
+POP_VIEWS_CQ = [1000, 5000, 20000, 80000]
 
 
-def test_content_quality_tidak_memberi_skor_karena_field_terisi():
-    """format_dominant dan content_topic tidak punya urutan kualitas."""
-    for format_dominan in ("Carousel", "Video", "Image"):
-        assert w.content_quality_score(format_dominan) is None
+def _post(eng=None, foll=None, er=None, views=None,
+          hidden=False, kolab=False):
+    return {"engagement_owned": eng, "followers_at_post_date": foll,
+            "er_followers": er, "views": views,
+            "likes_hidden": hidden, "is_collaboration": kolab}
+
+
+def _cq(posts):
+    r = w.ringkas_post_content_quality(posts)
+    return w.content_quality_score(r["er_pct"], POP_ER_CQ,
+                                   r["median_views"], POP_VIEWS_CQ,
+                                   r["er_sd_pp"], r["er_posts"]), r
+
+
+# Empat post stabil: ER 2,0 / 2,1 / 1,9 / 2,0 %  ->  SD 0,08 pp  ->  High.
+STABIL = [_post(20, 1000, 0.020, 5000), _post(21, 1000, 0.021, 6000),
+          _post(19, 1000, 0.019, 5500), _post(20, 1000, 0.020, 5200)]
+
+
+def test_content_quality_berlabel_proxy_dari_post_metric():
+    k = w.KRITERIA["content_quality"]
+    assert k["sifat"] == w.PROXY
+    assert k["sumber"] and all(s.startswith("l2_gold.post_metric.")
+                               for s in k["sumber"])
+
+
+def test_content_quality_bobot_50_30_20():
+    assert (w.BOBOT_CQ_ENGAGEMENT, w.BOBOT_CQ_VIEWS,
+            w.BOBOT_CQ_KONSISTENSI) == (0.50, 0.30, 0.20)
+    assert (w.BOBOT_CQ_ENGAGEMENT + w.BOBOT_CQ_VIEWS
+            + w.BOBOT_CQ_KONSISTENSI) == pytest.approx(1.0)
+
+
+def test_content_quality_data_normal():
+    """ER aditif 80/4000 = 2,0% -> persentil 66,67. Median views 5.350 ->
+    66,67. SD 0,08 pp -> High -> 100.  0,5x66,67 + 0,3x66,67 + 0,2x100."""
+    skor, r = _cq(STABIL)
+    assert r["er_pct"] == pytest.approx(2.0)
+    assert r["median_views"] == pytest.approx(5350)
+    assert r["er_posts"] == 4
+    assert skor == pytest.approx(0.5 * 66.6667 + 0.3 * 66.6667 + 0.2 * 100,
+                                 abs=1e-3)
+
+
+def test_content_quality_views_null_direnormalisasi_bukan_nol():
+    """Views tidak ada -> komponen views keluar; engagement dan consistency
+    dibagi 0,7, tidak diturunkan seolah views = 0."""
+    posts = [dict(p, views=None) for p in STABIL]
+    skor, r = _cq(posts)
+    assert r["median_views"] is None
+    assert skor == pytest.approx((0.5 * 66.6667 + 0.2 * 100) / 0.7, abs=1e-3)
+    assert skor > (0.5 * 66.6667 + 0.2 * 100)       # bukan diam-diam views=0
+
+
+def test_content_quality_engagement_null():
+    """Tanpa satu pun post ber-ER: engagement DAN consistency tidak terukur
+    (consistency dihitung dari ER per post). Yang tersisa hanya views."""
+    posts = [_post(views=5000), _post(views=6000), _post(views=5500)]
+    skor, r = _cq(posts)
+    assert r["er_pct"] is None and r["er_sd_pp"] is None and r["er_posts"] == 0
+    assert skor == pytest.approx(66.6667, abs=1e-3)
+
+
+def test_content_quality_kreator_tanpa_post_null():
+    skor, r = _cq([])
+    assert skor is None
+    assert r == {"er_pct": None, "median_views": None,
+                 "er_sd_pp": None, "er_posts": 0}
+
+
+def test_content_quality_hanya_satu_post():
+    """Satu post: engagement dan views terukur, consistency TIDAK (minimum 3
+    dari metrics_thresholds) -- jadi bukan 'High Stability' karena kurang
+    data."""
+    skor, r = _cq([_post(20, 1000, 0.020, 5000)])
+    assert r["er_sd_pp"] is None and r["er_posts"] == 1
+    assert skor == pytest.approx((0.5 * 66.6667 + 0.3 * 33.3333) / 0.8,
+                                 abs=1e-3)
+
+
+def test_content_quality_performa_stabil_konsistensi_penuh():
+    r = w.ringkas_post_content_quality(STABIL)
+    assert r["er_sd_pp"] < 1.0
+    assert w.content_quality_score(None, POP_ER_CQ, None, POP_VIEWS_CQ,
+                                   r["er_sd_pp"], r["er_posts"]) == 100.0
+
+
+def test_content_quality_performa_sangat_tidak_stabil():
+    """ER 0,5 / 8 / 1 / 12 % -> SD jauh di atas 3 pp -> Low -> 0. Engagement
+    rata-ratanya tinggi, tapi ketidakstabilan menurunkan skor dibanding
+    kreator yang sama tanpa komponen consistency."""
+    posts = [_post(5, 1000, 0.005, 5000), _post(80, 1000, 0.080, 6000),
+             _post(10, 1000, 0.010, 5500), _post(120, 1000, 0.120, 5200)]
+    skor, r = _cq(posts)
+    assert r["er_sd_pp"] > 3.0
+    assert w.content_quality_score(None, POP_ER_CQ, None, POP_VIEWS_CQ,
+                                   r["er_sd_pp"], r["er_posts"]) == 0.0
+    assert skor == pytest.approx(0.5 * 100 + 0.3 * 66.6667 + 0.2 * 0, abs=1e-3)
+    tanpa_konsistensi = (0.5 * 100 + 0.3 * 66.6667) / 0.8
+    assert skor < tanpa_konsistensi
+
+
+def test_content_quality_aturan_sampel_views():
+    """Post likes_hidden, kolaborasi, dan views 0 tidak ikut median views."""
+    posts = [_post(views=5000), _post(views=999999, hidden=True),
+             _post(views=999999, kolab=True), _post(views=0)]
+    assert w.ringkas_post_content_quality(posts)["median_views"] == 5000
+
+
+def test_content_quality_tidak_memakai_format_atau_topik():
+    import inspect
+    params = inspect.signature(w.content_quality_score).parameters
+    assert not any(p in params for p in ("format_dominant", "content_topic"))
+
+
+def test_content_quality_semua_komponen_null_jadi_null():
+    assert w.content_quality_score(None, POP_ER_CQ, None, POP_VIEWS_CQ,
+                                   None, 0) is None
 
 
 # ===========================================================================
@@ -362,13 +471,13 @@ def test_modul_brand_safety_tidak_ada():
     assert not (AKAR / "brand_safety_scoring.py").exists()
 
 
-def test_kriteria_tidak_tersedia_tetap_terdaftar():
-    """Supaya UI bisa menampilkannya nonaktif dengan alasannya, bukan
-    menyembunyikannya."""
+def test_seluruh_kriteria_kini_aktif():
+    """Content Quality tidak lagi TIDAK_TERSEDIA; keenam kriteria aktif."""
     tidak_aktif = [k for k in w.URUTAN_KRITERIA
                    if w.KRITERIA[k]["sifat"] == w.TIDAK_TERSEDIA]
-    assert tidak_aktif == ["content_quality"]
-    assert len(w.KRITERIA_AKTIF) == 5
+    assert tidak_aktif == []
+    assert len(w.KRITERIA_AKTIF) == 6
+    assert "content_quality" in w.KRITERIA_AKTIF
 
 
 # ===========================================================================
@@ -524,13 +633,26 @@ def test_sql_rata_rata_memakai_nullif_pada_penyebut():
     assert "COALESCE(a, 0)" in sql
 
 
-def test_sql_what_matters_mengeluarkan_kriteria_tidak_tersedia():
+def test_sql_what_matters_mengeluarkan_kriteria_tidak_tersedia(monkeypatch):
+    """Mekanismenya tetap ada walau hari ini tidak ada kriteria nonaktif."""
+    monkeypatch.setitem(w.KRITERIA, "community",
+                        {**w.KRITERIA["community"], "sifat": w.TIDAK_TERSEDIA})
+    kolom = {k: k + "_col" for k in w.KRITERIA}
+    sql = w.sql_what_matters(["engagement", "community"], kolom)
+    assert "engagement_col" in sql
+    assert "community_col" not in sql
+    assert w.sql_what_matters(["community"], kolom) == "NULL"
+
+
+def test_sql_what_matters_menyertakan_content_quality():
     kolom = {k: k + "_col" for k in w.KRITERIA}
     sql = w.sql_what_matters(["engagement", "content_quality"], kolom)
     assert "engagement_col" in sql
-    assert "content_quality_col" not in sql
+    assert "content_quality_col" in sql
 
 
-def test_sql_what_matters_tanpa_kriteria_valid_jadi_null():
-    kolom = {k: k + "_col" for k in w.KRITERIA}
-    assert w.sql_what_matters(["content_quality"], kolom) == "NULL"
+def test_sql_rata_rata_berbobot_renormalisasi_dengan_nullif():
+    sql = w.sql_rata_rata_berbobot(("a", 0.5), ("b", 0.3))
+    assert "COALESCE((a), 0) * 0.5" in sql
+    assert "CASE WHEN (b) IS NULL THEN 0 ELSE 0.3 END" in sql
+    assert "NULLIF(" in sql

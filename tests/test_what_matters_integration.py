@@ -115,9 +115,13 @@ def test_kriteria_tidak_tersedia_tidak_masuk_penyebut():
     assert "NULL::numeric" not in sql
 
 
-def test_hanya_kriteria_tidak_tersedia_menghasilkan_null():
-    ekspresi = w.sql_ekspresi_skor()
-    assert w.sql_what_matters(["content_quality"], ekspresi) == "NULL"
+def test_content_quality_sql_dari_post_metric_berbobot():
+    sql = w.sql_ekspresi_skor()["content_quality"]
+    assert "NULL::numeric" not in sql
+    for kolom in ("cq.er_pct", "cq.median_views", "cq.er_sd_pp", "cq.er_posts"):
+        assert kolom in sql
+    assert "* 0.5" in sql and "* 0.3" in sql and "* 0.2" in sql
+    assert "NULLIF(" in sql
 
 
 def test_jumlah_kontributor_menghitung_yang_tidak_null():
@@ -155,9 +159,12 @@ def test_tidak_ada_konstanta_mock_di_query():
         assert mock not in sql
 
 
-def test_content_quality_tetap_null_di_sql():
-    ekspresi = w.sql_ekspresi_skor()
-    assert ekspresi["content_quality"] == "NULL::numeric"
+def test_cte_post_quality_hanya_di_jalur_what_matters():
+    sql = db._query_what_matters(["content_quality"])
+    assert "post_quality AS (" in sql
+    assert "FROM l2_gold.post_metric" in sql
+    assert "LEFT JOIN post_quality cq" in sql
+    assert "post_quality" not in db._SEARCH_QUERY
 
 
 def test_brand_safety_tidak_ada_di_jalur_sql():
@@ -253,12 +260,88 @@ def test_db_kontributor_terisi_saat_ada_skor(conn):
             assert r.what_matters_contributing >= 1
 
 
+def _akun_post_metric(conn):
+    """Semua baris post_metric, dikelompokkan per akun, plus id KOL-nya.
+
+    Dikunci dengan `kol_directory.id`, BUKAN username: handle yang sama bisa
+    punya akun Instagram DAN TikTok (3 kasus di data sekarang), dan mengunci
+    dengan username akan menyatukan dua akun menjadi satu.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT kd.id::text, pm.social_account_id::text,
+                   pm.likes_hidden, pm.is_collaboration, pm.engagement_owned,
+                   pm.followers_at_post_date, pm.er_followers, pm.views
+              FROM l2_gold.post_metric pm
+              JOIN public.kol_social_account ksa
+                ON ksa.social_account_id = pm.social_account_id
+              JOIN public.kol_directory kd ON kd.id = ksa.kol_id""")
+        akun: dict[str, list] = {}
+        nama: dict[str, str] = {}
+        for u, sid, hid, kol, eng, foll, er, views in cur.fetchall():
+            nama[sid] = u
+            akun.setdefault(sid, []).append({
+                "likes_hidden": hid, "is_collaboration": kol,
+                "engagement_owned": eng, "followers_at_post_date": foll,
+                "er_followers": er, "views": views})
+    return akun, nama
+
+
 @pytest.mark.needs_db
-def test_db_kriteria_tidak_tersedia_semua_null(conn):
-    hasil = db.search_kol_directory(
-        conn, matters="content_quality", limit=5)
-    assert hasil
-    for r in hasil:
+def test_db_cte_post_quality_paritas_dengan_python(conn):
+    """Angka mentah CTE SQL = `ringkas_post_content_quality` Python, per akun."""
+    akun, _ = _akun_post_metric(conn)
+    with conn.cursor() as cur:
+        cur.execute("WITH " + w.SQL_CONTENT_QUALITY_CTE.strip()
+                    + " SELECT social_account_id::text, er_pct, median_views,"
+                      " er_sd_pp, er_posts FROM post_quality")
+        baris = cur.fetchall()
+    assert len(baris) == len({r[0] for r in baris})       # satu baris per akun
+    assert len(baris) == len(akun)
+    for sid, er, med, sd, n in baris:
+        py = w.ringkas_post_content_quality(akun[sid])
+        assert py["er_posts"] == n
+        for a, b in ((py["er_pct"], er), (py["median_views"], med),
+                     (py["er_sd_pp"], sd)):
+            assert (a is None) == (b is None), sid
+            if a is not None:
+                assert float(b) == pytest.approx(a, abs=1e-6), sid
+
+
+@pytest.mark.needs_db
+def test_db_content_quality_paritas_sql_dengan_python(conn):
+    """Skor Content Quality SQL = `content_quality_score` Python atas populasi
+    yang sama (seluruh direktori, tanpa filter)."""
+    akun, nama = _akun_post_metric(conn)
+    ringkas = {nama[sid]: w.ringkas_post_content_quality(p)
+               for sid, p in akun.items()}
+    assert len(ringkas) == len(akun)        # satu KOL per akun, tanpa tabrakan
+    pop_er = [r["er_pct"] for r in ringkas.values() if r["er_pct"] is not None]
+    pop_v = [r["median_views"] for r in ringkas.values()
+             if r["median_views"] is not None]
+
+    hasil = db.search_kol_directory(conn, matters="content_quality", limit=60)
+    terskor = [r for r in hasil if r.what_matters_score is not None]
+    assert terskor
+    for r in terskor:
+        x = ringkas[r.id]
+        harapan = w.content_quality_score(
+            x["er_pct"], pop_er, float(x["median_views"])
+            if x["median_views"] is not None else None, pop_v,
+            x["er_sd_pp"], x["er_posts"])
+        assert harapan == pytest.approx(r.what_matters_score, abs=1e-3), r.id
+        assert r.what_matters_contributing == 1
+
+
+@pytest.mark.needs_db
+def test_db_content_quality_akun_tanpa_post_tetap_null(conn):
+    """Akun tanpa post tetap muncul, skornya NULL -- bukan hilang, bukan 0."""
+    akun, nama = _akun_post_metric(conn)
+    punya_post = set(nama.values())
+    hasil = db.search_kol_directory(conn, matters="content_quality", limit=200)
+    tanpa_post = [r for r in hasil if r.id not in punya_post]
+    assert tanpa_post
+    for r in tanpa_post:
         assert r.what_matters_score is None
         assert r.what_matters_contributing == 0
 

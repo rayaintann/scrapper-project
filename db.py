@@ -629,7 +629,7 @@ _SEARCH_BODY_TEMPLATE = """
       LEFT JOIN public.platforms p            ON p.id = k.platform_id
       LEFT JOIN public.kol_social_account ksa ON ksa.kol_id = k.id
       LEFT JOIN l2_gold.kol_profile_card pc   ON pc.social_account_id = ksa.social_account_id
-      LEFT JOIN growth g                      ON g.social_account_id = ksa.social_account_id
+      LEFT JOIN growth g                      ON g.social_account_id = ksa.social_account_id{join_tambahan}
      WHERE (%(q_contains)s::text IS NULL
             OR k.username      ILIKE %(q_contains)s
             OR pc.display_name ILIKE %(q_contains)s
@@ -669,7 +669,8 @@ _SEARCH_ORDER_RELEVANSI = """
 
 #: Jalur baca biasa — tanpa kolom tambahan, perilakunya tidak berubah.
 _SEARCH_QUERY = ("WITH " + SQL_GROWTH_CTE
-                 + _SEARCH_BODY_TEMPLATE.format(kolom_tambahan="")
+                 + _SEARCH_BODY_TEMPLATE.format(kolom_tambahan="",
+                                                join_tambahan="")
                  + _SEARCH_ORDER_RELEVANSI)
 
 #: Ranking What Matters. Tie-break-nya sama dengan jalur biasa supaya urutan
@@ -698,6 +699,12 @@ def _query_what_matters(dipilih: Sequence[str]) -> str:
     Konsekuensi yang disengaja: populasi pembandingnya adalah hasil pencarian,
     bukan seluruh direktori. "Seberapa tinggi kreator ini dibanding kandidat
     yang sedang saya lihat" adalah pertanyaan yang memang ditanyakan Discovery.
+
+    Content Quality membaca metric post lewat CTE `post_quality` (alias `cq`),
+    yang hanya ikut di jalur ini. LEFT JOIN: akun tanpa post tetap muncul,
+    dengan Content Quality NULL -- bukan hilang, bukan nol. `post_metric`
+    unik per (social_account_id, platform, content_id) dan CTE-nya mengagregasi
+    per `social_account_id`, jadi JOIN ini tidak menggandakan baris.
     """
     ekspresi = wm.sql_ekspresi_skor()
     tambahan = (
@@ -706,8 +713,11 @@ def _query_what_matters(dipilih: Sequence[str]) -> str:
         f",\n           ({wm.sql_jumlah_kontributor(dipilih, ekspresi)})"
         f" AS what_matters_contributing"
     )
-    return ("WITH " + SQL_GROWTH_CTE
-            + _SEARCH_BODY_TEMPLATE.format(kolom_tambahan=tambahan)
+    join_cq = ("\n      LEFT JOIN post_quality cq"
+               "               ON cq.social_account_id = ksa.social_account_id")
+    return ("WITH " + SQL_GROWTH_CTE + "," + wm.SQL_CONTENT_QUALITY_CTE
+            + _SEARCH_BODY_TEMPLATE.format(kolom_tambahan=tambahan,
+                                           join_tambahan=join_cq)
             + _SEARCH_ORDER_MATTERS)
 
 
