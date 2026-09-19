@@ -1,8 +1,8 @@
-"""What Matters Most — 7 kriteria, normalisasi, dan aturan NULL.
+"""What Matters Most — 6 kriteria, normalisasi, dan aturan NULL.
 
 Yang dijaga test ini, berurutan sesuai daftar wajib:
 
-     1  ketujuh kriteria punya mapping jelas
+     1  keenam kriteria punya mapping jelas
      2  normalisasi menghasilkan 0..100
      3  NULL tidak berubah jadi 0
      4  Strong Engagement memakai ER
@@ -12,7 +12,7 @@ Yang dijaga test ini, berurutan sesuai daftar wajib:
      8  High Reach memakai views sebagai proxy
      9  Community berlabel PROXY
     10  Content Quality = Engagement 50 + Views 30 + Consistency 20
-    11  Brand Safety tidak memakai fake sentiment
+    11  Brand Safety BUKAN kriteria: tidak ada skor, proxy, maupun sentiment
     12  What Matters Score = rata-rata kriteria terpilih
     13  kriteria NULL keluar dari penyebut
     14  semua kriteria NULL -> final NULL
