@@ -378,8 +378,9 @@ class RantaiSampaiL2(unittest.TestCase):
 
         from dagster import Output
         from kol_orchestration.assets import (
-            audience, creator_age, feature_engagement, feature_post, followers,
-            gold, gold_post, gold_profile, harmonization, silver,
+            audience, creator_age, creator_gender, feature_engagement,
+            feature_post, followers, gold, gold_post, gold_profile,
+            harmonization, silver,
         )
         from kol_orchestration.repository import defs
 
@@ -404,6 +405,8 @@ class RantaiSampaiL2(unittest.TestCase):
             # memang dua fitur: umur AUDIENS vs umur KREATOR.
             (audience, "_tulis_age_terukur"),
             (creator_age, "_jalankan"),
+            # Gender KREATOR, migration 051. Bukan fitur audiens.
+            (creator_gender, "_jalankan"),
         )
 
         with warnings.catch_warnings():
@@ -440,6 +443,7 @@ class RantaiSampaiL2(unittest.TestCase):
         # mana yang hilang.
         self.assertIn("audience_age_measured", dijalankan)
         self.assertIn("creator_age", dijalankan)
+        self.assertIn("creator_gender", dijalankan)
 
     def test_urutan_eksekusi_l0_ke_l2_dijaga_dagster(self):
         """Urutan datang dari `deps` di job hasil resolve, bukan urutan daftar."""

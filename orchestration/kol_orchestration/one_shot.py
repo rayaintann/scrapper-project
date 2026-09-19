@@ -138,6 +138,10 @@ TRANSFORM_ASSETS = (
     # atas.
     "audience_age_measured",
     "creator_age",
+    # Gender KREATOR (migration 051), pola yang sama dengan creator_age: jalan
+    # setelah kol_profile_card, hanya meng-UPDATE kolomnya sendiri. Di sini
+    # supaya KOL baru dari "Add New KOL" ikut terisi lewat sensor l0_raw.
+    "creator_gender",
 )
 
 
@@ -152,6 +156,7 @@ def _semua_asset():
     """
     from kol_orchestration.assets.audience import audience_assets
     from kol_orchestration.assets.creator_age import creator_age_assets
+    from kol_orchestration.assets.creator_gender import creator_gender_assets
     from kol_orchestration.assets.feature_engagement import feature_engagement_assets
     from kol_orchestration.assets.feature_post import feature_post_assets
     from kol_orchestration.assets.followers import follower_assets
@@ -166,6 +171,7 @@ def _semua_asset():
         *feature_engagement_assets, *feature_post_assets,
         *gold_assets, *gold_post_assets, *gold_profile_assets,
         *follower_assets, *audience_assets, *creator_age_assets,
+        *creator_gender_assets,
     ]
 
 

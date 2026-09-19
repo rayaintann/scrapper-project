@@ -94,6 +94,7 @@ from kol_orchestration.assets.gold_profile import gold_profile_assets
 from kol_orchestration.assets.followers import follower_assets
 from kol_orchestration.assets.audience import audience_assets
 from kol_orchestration.assets.creator_age import creator_age_assets
+from kol_orchestration.assets.creator_gender import creator_gender_assets
 from kol_orchestration.one_shot import one_shot_jobs, one_shot_schedules
 from kol_orchestration.sensors import l0_raw_sensors
 
@@ -146,6 +147,7 @@ defs = Definitions(
         *follower_assets,            # l0_harm + l1: rantai daftar follower
         *audience_assets,            # feature + l2_gold: audiens (inferensi + umur terukur)
         *creator_age_assets,         # l2_gold: umur KREATOR di kartu profil (bukan audiens)
+        *creator_gender_assets,      # l2_gold: gender KREATOR di kartu profil (bukan audiens)
     ],
     jobs=one_shot_jobs,
     # Sengaja kosong: tidak ada schedule/cron apa pun di project ini.
