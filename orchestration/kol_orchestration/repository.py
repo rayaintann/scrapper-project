@@ -97,6 +97,7 @@ from kol_orchestration.assets.creator_age import creator_age_assets
 from kol_orchestration.assets.creator_gender import creator_gender_assets
 from kol_orchestration.one_shot import one_shot_jobs, one_shot_schedules
 from kol_orchestration.sensors import l0_raw_sensors
+from kol_orchestration.brand_match import brand_match_jobs, brand_match_sensors
 
 # .env ada di root project (satu tingkat di atas folder orchestration/).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -149,13 +150,15 @@ defs = Definitions(
         *creator_age_assets,         # l2_gold: umur KREATOR di kartu profil (bukan audiens)
         *creator_gender_assets,      # l2_gold: gender KREATOR di kartu profil (bukan audiens)
     ],
-    jobs=one_shot_jobs,
+    # + brand_match_job: Brand Match di background (lihat brand_match.py).
+    jobs=[*one_shot_jobs, *brand_match_jobs],
     # Sengaja kosong: tidak ada schedule/cron apa pun di project ini.
     schedules=one_shot_schedules,
     # Event-based, bukan waktu-based. Lihat sensors.py: memantau baris baru di
     # 8 tabel sumber l0_raw, lalu menjalankan transform_chain_job. Tidak pernah
     # memanggil Apify.
-    sensors=l0_raw_sensors,
+    # + dua sensor Brand Match: Brand Profile berubah, dan transform_chain_job sukses.
+    sensors=[*l0_raw_sensors, *brand_match_sensors],
     resources={
         "postgres": PostgresResource(
             connection_string=_build_connection_string(),

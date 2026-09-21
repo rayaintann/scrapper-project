@@ -752,7 +752,10 @@ class TanpaScheduleAtauCron(unittest.TestCase):
             warnings.simplefilter("ignore")
             repo = defs.get_repository_def()
         self.assertEqual(list(repo.schedule_defs), [], "jumlah schedule harus 0")
-        self.assertEqual([s.name for s in repo.sensor_defs], [SENSOR_NAME])
+        # Event-based saja: sensor l0_raw plus dua sensor Brand Match
+        # (brand_match.py). Tidak ada schedule di atas.
+        self.assertEqual(sorted(s.name for s in repo.sensor_defs), sorted([
+            SENSOR_NAME, "brand_profile_changed_sensor", "brand_match_after_transform"]))
 
     def test_daftar_schedule_masih_kosong(self):
         self.assertEqual(one_shot.one_shot_schedules, [])
@@ -782,7 +785,8 @@ class TanpaScheduleAtauCron(unittest.TestCase):
     def test_definitions_masih_memakai_daftar_schedule_kosong(self):
         s = _sumber(ORCH / "repository.py")
         self.assertIn("schedules=one_shot_schedules", s)
-        self.assertIn("sensors=l0_raw_sensors", s)
+        self.assertIn("*l0_raw_sensors", s)
+        self.assertIn("*brand_match_sensors", s)
 
 
 # ===========================================================================
