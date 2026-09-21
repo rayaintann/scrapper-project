@@ -713,9 +713,15 @@ def _query_what_matters(dipilih: Sequence[str]) -> str:
         f",\n           ({wm.sql_jumlah_kontributor(dipilih, ekspresi)})"
         f" AS what_matters_contributing"
     )
+    # Feature ER milik platform KOL itu sendiri (lihat "SUMBER ER" di
+    # what_matters_scoring.py). LEFT JOIN: tanpa Feature ER, ER-nya NULL.
     join_cq = ("\n      LEFT JOIN post_quality cq"
-               "               ON cq.social_account_id = ksa.social_account_id")
+               "               ON cq.social_account_id = ksa.social_account_id"
+               "\n      LEFT JOIN feature_er fe"
+               "               ON fe.social_account_id = ksa.social_account_id"
+               " AND fe.platform = p.key")
     return ("WITH " + SQL_GROWTH_CTE + "," + wm.SQL_CONTENT_QUALITY_CTE
+            + "," + wm.SQL_FEATURE_ER_CTE
             + _SEARCH_BODY_TEMPLATE.format(kolom_tambahan=tambahan,
                                            join_tambahan=join_cq)
             + _SEARCH_ORDER_MATTERS)

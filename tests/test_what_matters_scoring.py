@@ -146,10 +146,33 @@ def test_populasi_kosong_menghasilkan_null_bukan_nol():
 # 4. STRONG ENGAGEMENT  <- ER
 # ===========================================================================
 
-def test_engagement_memakai_kol_directory_engagement_rate():
-    assert w.KRITERIA["engagement"]["sumber"] == (
-        "public.kol_directory.engagement_rate",)
+FEATURE_ER = ("feature.ig_engagement_analysis.engagement_rate",
+              "feature.tt_engagement_analysis.engagement_rate")
+
+
+def test_engagement_memakai_feature_er_per_platform():
+    assert w.KRITERIA["engagement"]["sumber"] == FEATURE_ER
     assert w.KRITERIA["engagement"]["sifat"] == w.REAL
+
+
+def test_tidak_ada_kriteria_yang_membaca_kol_directory_engagement_rate():
+    for kunci, k in w.KRITERIA.items():
+        assert "public.kol_directory.engagement_rate" not in k["sumber"], kunci
+    assert w.KOLOM_SUMBER_DEFAULT["engagement_rate"] == "fe.engagement_rate"
+
+
+def test_sql_er_diperingkat_per_platform_dan_dipakai_content_quality():
+    """ER di SQL = Feature ER (alias `fe`), persentilnya per platform, dan
+    bagian Engagement Content Quality memakai ekspresi ER yang sama -- bukan
+    `cq.er_pct` dari post_metric."""
+    e = w.sql_ekspresi_skor()
+    assert "PARTITION BY p.key, (fe.engagement_rate IS NULL)" in e["engagement"]
+    assert e["engagement"] in e["community"]
+    assert e["engagement"] in e["content_quality"]
+    assert "cq.er_pct" not in e["content_quality"]
+    assert "k.engagement_rate" not in "".join(e.values())
+    assert "feature.ig_engagement_analysis" in w.SQL_FEATURE_ER_CTE
+    assert "feature.tt_engagement_analysis" in w.SQL_FEATURE_ER_CTE
 
 
 def test_engagement_lebih_tinggi_skornya_lebih_tinggi():
@@ -339,11 +362,15 @@ STABIL = [_post(20, 1000, 0.020, 5000), _post(21, 1000, 0.021, 6000),
           _post(19, 1000, 0.019, 5500), _post(20, 1000, 0.020, 5200)]
 
 
-def test_content_quality_berlabel_proxy_dari_post_metric():
+def test_content_quality_berlabel_proxy_dari_feature_er_dan_post_metric():
+    """Engagement = Feature ER per platform; Views dan Consistency tetap dari
+    post_metric."""
     k = w.KRITERIA["content_quality"]
     assert k["sifat"] == w.PROXY
     assert k["sumber"] and all(s.startswith("l2_gold.post_metric.")
-                               for s in k["sumber"])
+                               or s in FEATURE_ER for s in k["sumber"])
+    assert set(FEATURE_ER) <= set(k["sumber"])
+    assert "l2_gold.post_metric.views" in k["sumber"]
 
 
 def test_content_quality_bobot_50_30_20():

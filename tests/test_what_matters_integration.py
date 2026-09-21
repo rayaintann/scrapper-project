@@ -115,11 +115,14 @@ def test_kriteria_tidak_tersedia_tidak_masuk_penyebut():
     assert "NULL::numeric" not in sql
 
 
-def test_content_quality_sql_dari_post_metric_berbobot():
+def test_content_quality_sql_dari_feature_er_dan_post_metric_berbobot():
     sql = w.sql_ekspresi_skor()["content_quality"]
     assert "NULL::numeric" not in sql
-    for kolom in ("cq.er_pct", "cq.median_views", "cq.er_sd_pp", "cq.er_posts"):
+    # Engagement = Feature ER (alias `fe`); Views + Consistency dari post_metric.
+    for kolom in ("fe.engagement_rate", "cq.median_views", "cq.er_sd_pp",
+                  "cq.er_posts"):
         assert kolom in sql
+    assert "cq.er_pct" not in sql
     assert "* 0.5" in sql and "* 0.3" in sql and "* 0.2" in sql
     assert "NULLIF(" in sql
 
@@ -316,7 +319,8 @@ def test_db_content_quality_paritas_sql_dengan_python(conn):
     ringkas = {nama[sid]: w.ringkas_post_content_quality(p)
                for sid, p in akun.items()}
     assert len(ringkas) == len(akun)        # satu KOL per akun, tanpa tabrakan
-    pop_er = [r["er_pct"] for r in ringkas.values() if r["er_pct"] is not None]
+    # Bagian Engagement = Feature ER platform KOL itu, diperingkat per platform.
+    peta, pop_er = _feature_er(conn)
     pop_v = [r["median_views"] for r in ringkas.values()
              if r["median_views"] is not None]
 
@@ -325,8 +329,9 @@ def test_db_content_quality_paritas_sql_dengan_python(conn):
     assert terskor
     for r in terskor:
         x = ringkas[r.id]
+        plat, er, _ = peta[r.id]
         harapan = w.content_quality_score(
-            x["er_pct"], pop_er, float(x["median_views"])
+            er, pop_er.get(plat, []), float(x["median_views"])
             if x["median_views"] is not None else None, pop_v,
             x["er_sd_pp"], x["er_posts"])
         assert harapan == pytest.approx(r.what_matters_score, abs=1e-3), r.id
@@ -354,22 +359,57 @@ def test_db_kunci_asing_kembali_ke_relevansi(conn):
         assert r.what_matters_score is None
 
 
+def _feature_er(conn):
+    """kol_directory.id -> (platform, Feature ER platform itu), dengan join
+    yang sama seperti jalur baca, plus populasi ER per platform. Populasinya
+    seluruh direktori -- pencarian tanpa filter."""
+    with conn.cursor() as cur:
+        cur.execute("WITH " + w.SQL_FEATURE_ER_CTE.strip() + """
+            SELECT k.id::text, p.key, fe.engagement_rate, k.engagement_rate
+              FROM public.kol_directory k
+              LEFT JOIN public.platforms p            ON p.id = k.platform_id
+              LEFT JOIN public.kol_social_account ksa ON ksa.kol_id = k.id
+              LEFT JOIN feature_er fe
+                     ON fe.social_account_id = ksa.social_account_id
+                    AND fe.platform = p.key""")
+        baris = cur.fetchall()
+    peta = {i: (plat, None if er is None else float(er), roster)
+            for i, plat, er, roster in baris}
+    populasi: dict[str, list[float]] = {}
+    for plat, er, _ in peta.values():
+        if er is not None:
+            populasi.setdefault(plat, []).append(er)
+    return peta, populasi
+
+
 @pytest.mark.needs_db
 def test_db_paritas_sql_dengan_python(conn):
-    """Persentil SQL harus sama dengan `engagement_score()` Python atas
-    populasi yang sama."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT username_normalized, engagement_rate "
-                    "FROM public.kol_directory")
-        semua = cur.fetchall()
-    populasi = [er for _, er in semua if er is not None]
-    peta = {u: er for u, er in semua}
-
-    for r in db.search_kol_directory(conn, matters="engagement", limit=5):
+    """Persentil SQL = `engagement_score()` Python atas Feature ER, dengan
+    populasi platform KOL itu sendiri."""
+    peta, populasi = _feature_er(conn)
+    terskor = 0
+    for r in db.search_kol_directory(conn, matters="engagement", limit=20):
         if r.what_matters_score is None:
             continue
-        harapan = w.engagement_score(peta[r.username], populasi)
-        assert abs(harapan - r.what_matters_score) < 0.001, r.username
+        plat, er, _ = peta[r.id]
+        harapan = w.engagement_score(er, populasi[plat])
+        assert abs(harapan - r.what_matters_score) < 0.001, r.id
+        terskor += 1
+    assert terskor
+
+
+@pytest.mark.needs_db
+def test_db_tanpa_feature_er_tidak_jatuh_ke_kol_directory(conn):
+    """KOL tanpa Feature ER: Strong Engagement NULL (bukan 0) walaupun
+    `kol_directory.engagement_rate`-nya terisi -- tidak ada fallback."""
+    peta, _ = _feature_er(conn)
+    hasil = db.search_kol_directory(conn, matters="engagement", limit=200)
+    tanpa = [r for r in hasil if peta[r.id][1] is None]
+    assert tanpa
+    assert any(peta[r.id][2] is not None for r in tanpa)
+    for r in tanpa:
+        assert r.what_matters_score is None, r.id
+        assert r.what_matters_contributing == 0, r.id
 
 
 @pytest.mark.needs_db

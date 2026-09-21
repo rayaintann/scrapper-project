@@ -43,10 +43,12 @@ Rumus yang disepakati sekarang memakai performa post itu sendiri, dari
 
     Content Quality = 50% Engagement + 30% Views + 20% Consistency
 
-    Engagement   ER akun ADITIF atas post yang punya `er_followers`:
-                 sum(engagement_owned) / sum(followers_at_post_date) x 100.
-                 Pola yang sama dengan `_ER_AKUN` di feature_engagement.py.
-                 Dinormalisasi dengan `persentil_ke_skor`.
+    Engagement   Feature ER akun di platformnya sendiri
+                 (`feature.ig_engagement_analysis` /
+                 `feature.tt_engagement_analysis`.engagement_rate) -- SAMA
+                 dengan sumber Strong Engagement, lihat "SUMBER ER" di bawah.
+                 Dinormalisasi dengan `persentil_ke_skor` dalam populasi
+                 platform yang sama.
     Views        median `views` atas post lolos sampel (bukan likes_hidden,
                  bukan kolaborasi) yang `views > 0` -- definisi yang sama
                  dengan `median_views` di migration 036. `reach` 0/522 terisi
@@ -65,9 +67,32 @@ direnormalisasi -- pola yang sama dengan `community_strength_score`. Semua
 komponen NULL -> NULL.
 
 Sifatnya PROXY: ini performa konten, bukan penilaian kualitas kreatif. Dan
-ia sengaja beririsan dengan Strong Engagement dan High Reach (sumbernya
-berbeda: post_metric vs kol_directory / kol_profile_card). Memilih ketiganya
-sekaligus memberi sinyal engagement dan views bobot lebih di rata-rata.
+ia sengaja beririsan dengan Strong Engagement (Feature ER yang sama) dan High
+Reach (views: post_metric vs kol_profile_card). Memilih ketiganya sekaligus
+memberi sinyal engagement dan views bobot lebih di rata-rata.
+
+============================================================================
+SUMBER ER  --  Feature ER, per platform, tanpa fallback
+============================================================================
+
+Setiap ER yang dipakai What Matters (Strong Engagement, bagian ER Community,
+bagian Engagement Content Quality) adalah Feature ER:
+`feature.ig_engagement_analysis` untuk KOL Instagram dan
+`feature.tt_engagement_analysis` untuk KOL TikTok, dipilih lewat platform
+baris `kol_directory` (`platforms.key`). Feature ER dihitung asset
+`feature_engagement.py` dari `l1_silver.unified_post` dengan penyebut
+`l1_silver.unified_profile.followers_count`.
+
+`kol_directory.engagement_rate` TIDAK dibaca, juga tidak sebagai fallback:
+rumusnya berbeda (rata-rata post terbaru actor dibagi followers hari ini) dan
+untuk TikTok tidak punya sumber yang bisa dilacak. Tanpa Feature ER, ER-nya
+NULL -- kriteria itu keluar dari rata-rata, bukan dihitung nol.
+
+Persentil ER dihitung PER PLATFORM: ER Instagram hanya dibandingkan dengan ER
+Instagram, TikTok dengan TikTok. Median ER kedua platform berbeda jauh,
+jadi satu populasi campuran akan menurunkan semua kreator TikTok. Views tetap
+satu populasi campuran. Sama dengan port Autometric
+(`src/lib/discover/whatMatters/records.ts`).
 
 BRAND SAFETY DIHAPUS DARI SCOPE. Keputusan terbaru: Brand Safety tidak lagi
 menjadi bagian Brand Match maupun What Matters. Kriterianya tidak terdaftar
@@ -114,8 +139,10 @@ KRITERIA: dict[str, dict] = {
         "nama": "Strong Engagement",
         "skor": "engagement_score",
         "sifat": REAL,
-        "sumber": ("public.kol_directory.engagement_rate",),
-        "catatan": "Peringkat persentil ER dalam populasi terukur.",
+        "sumber": ("feature.ig_engagement_analysis.engagement_rate",
+                   "feature.tt_engagement_analysis.engagement_rate"),
+        "catatan": "Peringkat persentil Feature ER dalam populasi terukur "
+                   "platform yang sama (IG dengan IG, TikTok dengan TikTok).",
     },
     "audience_quality": {
         "nama": "High Audience Quality",
@@ -139,7 +166,8 @@ KRITERIA: dict[str, dict] = {
         "skor": "community_strength_score",
         "sifat": PROXY,
         "sumber": ("l2_gold.kol_profile_card.audience_quality_score",
-                   "public.kol_directory.engagement_rate"),
+                   "feature.ig_engagement_analysis.engagement_rate",
+                   "feature.tt_engagement_analysis.engagement_rate"),
         "catatan": "PROXY. Bukan ukuran komunitas sebenarnya -- tidak ada "
                    "kolom community di seluruh DB.",
     },
@@ -155,13 +183,13 @@ KRITERIA: dict[str, dict] = {
         "nama": "Content Quality",
         "skor": "content_quality_score",
         "sifat": PROXY,
-        "sumber": ("l2_gold.post_metric.engagement_owned",
-                   "l2_gold.post_metric.followers_at_post_date",
+        "sumber": ("feature.ig_engagement_analysis.engagement_rate",
+                   "feature.tt_engagement_analysis.engagement_rate",
                    "l2_gold.post_metric.er_followers",
                    "l2_gold.post_metric.views"),
-        "catatan": "PROXY performa konten: Engagement 50% + Views 30% + "
-                   "Consistency 20%, dari post_metric. Views bukan reach. "
-                   "Format dan topik TIDAK dipakai.",
+        "catatan": "PROXY performa konten: Engagement 50% (Feature ER per "
+                   "platform) + Views 30% + Consistency 20% (post_metric). "
+                   "Views bukan reach. Format dan topik TIDAK dipakai.",
     },
 }
 
@@ -487,8 +515,11 @@ def sql_ordinal(kolom: str, tingkat: tuple[str, ...]) -> str:
     return f"CASE\n{bagian}\n        ELSE NULL\n    END"
 
 
-def sql_persentil(kolom: str) -> str:
+def sql_persentil(kolom: str, partisi: str | None = None) -> str:
     """0..100 atas populasi TERUKUR saja. NULL tetap NULL.
+
+    `partisi` (opsional) memecah populasi lebih jauh -- dipakai ER, yang
+    diperingkat per platform (lihat "SUMBER ER" di atas).
 
     `PARTITION BY ({kolom} IS NULL)` bukan hiasan — tanpanya, baris NULL ikut
     masuk penyebut `percent_rank()` dan seluruh skor mengecil sebanding
@@ -499,9 +530,10 @@ def sql_persentil(kolom: str) -> str:
     kelompok non-NULL dihitung hanya terhadap sesama non-NULL — sepadan dengan
     `persentil_ke_skor()`, yang juga membuang None dari populasi.
     """
+    kelompok = f"{partisi}, ({kolom} IS NULL)" if partisi else f"({kolom} IS NULL)"
     return (f"CASE WHEN {kolom} IS NULL THEN NULL "
             f"ELSE percent_rank() OVER "
-            f"(PARTITION BY ({kolom} IS NULL) ORDER BY {kolom}) * {SKALA_MAX} "
+            f"(PARTITION BY {kelompok} ORDER BY {kolom}) * {SKALA_MAX} "
             f"END")
 
 
@@ -555,9 +587,24 @@ SQL_CONTENT_QUALITY_CTE = """
          GROUP BY social_account_id
     )"""
 
+#: CTE Feature ER: satu baris per (platform, akun), platform diambil dari
+#: TABEL-nya, jadi join `fe.platform = p.key` hanya bisa memilih ER platform
+#: KOL itu sendiri. Di-JOIN ke jalur baca sebagai alias `fe`
+#: (lihat `db._query_what_matters`). Masing-masing tabel UNIQUE per akun.
+SQL_FEATURE_ER_CTE = """
+    feature_er AS (
+        SELECT 'instagram'::text AS platform, social_account_id, engagement_rate
+          FROM feature.ig_engagement_analysis
+        UNION ALL
+        SELECT 'tiktok'::text, social_account_id, engagement_rate
+          FROM feature.tt_engagement_analysis
+    )"""
+
 #: Kolom sumber default, sesuai alias di `_SEARCH_QUERY`.
 KOLOM_SUMBER_DEFAULT = {
-    "engagement_rate": "k.engagement_rate",
+    # Feature ER platform KOL itu sendiri (CTE `feature_er`, alias `fe`).
+    "engagement_rate": "fe.engagement_rate",
+    "platform": "p.key",
     "audience_quality_score": "pc.audience_quality_score",
     "authenticity_score": "pc.authenticity_score",
     "performance_stability": "pc.performance_stability",
@@ -587,13 +634,16 @@ def sql_ekspresi_skor(kolom: dict[str, str] | None = None) -> dict[str, str]:
     LIMIT. Menghitung persentil atas satu halaman akan memberi peringkat yang
     artinya berubah-ubah tiap kali orang menggeser halaman.
 
-    `content_quality` membaca alias `cq` dari `SQL_CONTENT_QUALITY_CTE`, jadi
-    query pemakainya wajib menyertakan CTE dan JOIN itu.
+    ER (`engagement`, `community`, bagian Engagement `content_quality`)
+    membaca alias `fe` dari `SQL_FEATURE_ER_CTE`, dan sisa `content_quality`
+    alias `cq` dari `SQL_CONTENT_QUALITY_CTE`; query pemakainya wajib
+    menyertakan kedua CTE dan JOIN-nya.
     """
     import metrics_thresholds as mt
 
     c = {**KOLOM_SUMBER_DEFAULT, **(kolom or {})}
-    er = sql_persentil(c["engagement_rate"])
+    # ER diperingkat per platform; Content Quality memakai ER yang sama.
+    er = sql_persentil(c["engagement_rate"], partisi=c["platform"])
     aq = sql_rata_rata_tersedia(c["audience_quality_score"],
                                 c["authenticity_score"])
     return {
@@ -614,7 +664,7 @@ def sql_ekspresi_skor(kolom: dict[str, str] | None = None) -> dict[str, str]:
         ),
         "reach": sql_persentil(c["median_views"]),
         "content_quality": sql_rata_rata_berbobot(
-            (sql_persentil(c["cq_er_pct"]), BOBOT_CQ_ENGAGEMENT),
+            (er, BOBOT_CQ_ENGAGEMENT),
             (sql_persentil(c["cq_median_views"]), BOBOT_CQ_VIEWS),
             (sql_ordinal("(" + mt.sql_stability(c["cq_er_sd_pp"],
                                                 c["cq_er_posts"]) + ")",
