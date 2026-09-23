@@ -39,7 +39,15 @@ from kol_orchestration.assets.feature_engagement import (  # noqa: E402
 def _post(baris: list[dict]) -> str:
     """CTE `post` dari literal.
 
-    Tiap baris: likes, comments, shares, is_sponsored, posted_at, lolos.
+    Tiap baris: likes, comments, shares, is_sponsored, posted_at, lolos
+    [, lolos_konten].
+
+    `lolos_konten` default MENGIKUTI `lolos`, yaitu kasus post keluar sampel
+    karena KOLABORASI -- sehingga arti seluruh test yang ditulis sebelum kolom
+    ini ada tetap sama. Post yang keluar sampel karena like disembunyikan
+    menyebutnya eksplisit: untuk post begitu, penanda endorse dan tanggal
+    posting tetap diketahui dan TIDAK boleh ikut hilang.
+
     Cast eksplisit di baris pertama supaya Postgres tidak menebak `unknown`.
     """
     def sel(v, tipe):
@@ -55,13 +63,15 @@ def _post(baris: list[dict]) -> str:
             sel(b.get("is_sponsored"), "boolean"),
             sel(b.get("posted_at"), "timestamptz"),
             sel(b.get("lolos", True), "boolean"),
+            sel(b.get("lolos_konten", b.get("lolos", True)), "boolean"),
         ]
         if i:  # cast cukup sekali, di baris pertama
             vals = [v.split("::")[0] if not v.startswith("NULL") else "NULL"
                     for v in vals]
         potongan.append("(" + ", ".join(vals) + ")")
     return ("(VALUES " + ", ".join(potongan) +
-            ") AS post(likes, comments, shares, is_sponsored, posted_at, lolos)")
+            ") AS post(likes, comments, shares, is_sponsored, posted_at, lolos,"
+            " lolos_konten)")
 
 
 def hitung(conn, baris: list[dict]) -> dict:
@@ -161,13 +171,36 @@ def test_paid_tidak_ada_konten_null(conn):
     assert h["paid_d"] == 0 and h["paid_ratio"] is None
 
 
-def test_paid_menghormati_aturan_sampel_lolos(conn):
-    """Post yang gagal sampel (likes_hidden / kolaborasi) tidak ikut."""
+def test_paid_menghormati_aturan_sampel_kolaborasi(conn):
+    """Post kolaborasi tidak ikut: sebagian kontennya milik akun lain."""
     baris = [P(is_sponsored=True), P(is_sponsored=True, lolos=False),
              P(is_sponsored=False)]
     h = hitung(conn, baris)
     assert h["paid_d"] == 2 and h["paid_n"] == 1
     assert float(h["paid_ratio"]) == 50.0
+
+
+def test_paid_tetap_terhitung_walau_like_disembunyikan(conn):
+    """Regresi 23 September.
+
+    Penanda endorse dibawa caption/platform dan tidak ada hubungannya dengan
+    apakah like ditampilkan. Aturan lama membuang keduanya sekaligus, sehingga
+    @rayanurfitrird -- yang 12 post ber-penanda endorse-nya SEMUA menyembunyikan
+    like -- tidak punya paid_ratio sama sekali.
+    """
+    baris = [P(is_sponsored=True, lolos=False, lolos_konten=True),
+             P(is_sponsored=False, lolos=False, lolos_konten=True)]
+    h = hitung(conn, baris)
+    assert h["paid_d"] == 2 and h["paid_n"] == 1
+    assert float(h["paid_ratio"]) == 50.0
+
+
+def test_frekuensi_tetap_terhitung_walau_like_disembunyikan(conn):
+    """Kapan akun memposting tidak bergantung pada like."""
+    baris = [P(posted_at="2026-09-01 10:00:00+07", lolos=False, lolos_konten=True),
+             P(posted_at="2026-09-11 10:00:00+07", lolos=False, lolos_konten=True)]
+    h = hitung(conn, baris)
+    assert h["freq_n"] == 2 and h["observation_days"] == 10
 
 
 # ===========================================================================

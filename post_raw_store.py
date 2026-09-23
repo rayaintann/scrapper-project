@@ -129,6 +129,30 @@ def _ig_views(item: dict) -> int | None:
     return plays if plays is not None else _as_int(item.get("videoViewCount"))
 
 
+#: `type` (selalu ada) -> nilai `productType` yang setara. Pemetaan ini bukan
+#: tebakan: pada baris yang PUNYA `productType`, ketiganya berpasangan 1:1 --
+#: Video/clips 531 baris, Sidecar/carousel_container 98, Image/feed 68.
+_TYPE_KE_PRODUCT = {"video": "clips", "sidecar": "carousel_container", "image": "feed"}
+
+
+def _media_type(item: dict) -> str | None:
+    """Format post: `productType`, jatuh ke `type`.
+
+    Actor `apify/instagram-profile-scraper` hanya mengirim `productType` untuk
+    Reels; untuk foto dan carousel field itu TIDAK ADA sama sekali, sementara
+    `type` selalu dikirim. Membaca `productType` saja membuat format post foto
+    dan carousel hilang walau payload-nya sudah dibayar dan sudah tersimpan
+    (22-23 September: 339 baris L0 / 288 dari 902 post L1 Instagram cohort
+    ber-media_type NULL, dan `format_dominant` ikut NULL karena `mode()`
+    mengabaikan NULL).
+    """
+    langsung = _text(item.get("productType"))
+    if langsung:
+        return langsung
+    tipe = _text(item.get("type"))
+    return _TYPE_KE_PRODUCT.get(tipe.strip().lower()) if tipe else None
+
+
 def _link_blocked(conn, table: str) -> str | None:
     """Sama seperti raw_store: tolak menautkan kalau kolomnya punya FK ganda."""
     targets = fk_targets(conn, table=table, column="social_account_id")
@@ -414,7 +438,7 @@ def insert_ig_posts(
                 fetched_at,
                 _text(item.get("timestamp")),
                 _text(item.get("caption")),
-                _text(item.get("productType")),
+                _media_type(item),
                 _text(item.get("url")),
                 _text(item.get("displayUrl")),
                 _as_int(item.get("commentsCount")),

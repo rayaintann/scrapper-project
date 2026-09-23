@@ -27,6 +27,16 @@ definisi, dipakai semua konsumen.
 
 Dampak pada data saat ini: Instagram 82 dari 130 post lolos, TikTok 91 dari 91.
 
+SAMPEL KEDUA: `lolos_konten` = `is_collaboration IS NOT TRUE` saja.
+Dipakai metrik yang TIDAK bergantung pada like — format media, play count,
+penanda endorse, dan frekuensi posting — beserta `content_topic`. Like yang
+disembunyikan membuat ENGAGEMENT tidak diketahui; ia tidak mengubah tipe media
+sebuah post, tidak menghapus play count yang tetap dilaporkan platform, dan
+tidak membuat tanggal posting hilang. Memakai satu sampel untuk keduanya
+membuat akun yang menyembunyikan like di seluruh post kehilangan empat fakta
+yang sebenarnya diketahui. ER, Paid-vs-organik share, save rate dan seluruh
+`total_*` tetap memakai `lolos`.
+
 ============================================================================
 KEPUTUSAN DESAIN
 ============================================================================
@@ -136,7 +146,20 @@ def _cte_dasar(platform_key: str) -> str:
                -- post lebih tua dari snapshot profil pertama -- tidak ditebak.
                foll.followers_count,
                -- dua aturan sampel, sudah berupa kolom di unified_post
-               (u.likes_hidden IS NOT TRUE AND u.is_collaboration IS NOT TRUE) AS lolos
+               (u.likes_hidden IS NOT TRUE AND u.is_collaboration IS NOT TRUE) AS lolos,
+               -- Sampel untuk fakta yang TIDAK bergantung pada like: format
+               -- media, play count, penanda endorse, tanggal posting. Like yang
+               -- disembunyikan membuat ENGAGEMENT tidak diketahui; ia tidak
+               -- membuat sebuah Reel berhenti menjadi Reel, dan tidak
+               -- menghapus play count yang tetap dilaporkan platform.
+               --
+               -- Alasannya sama persis dengan yang sudah dipakai
+               -- SQL_POST_UNTUK_TOPIK. Tanpa ini, akun yang menyembunyikan
+               -- like di SELURUH post kehilangan format, views, penanda
+               -- endorse, dan frekuensi posting sekaligus (23 September:
+               -- @rayanurfitrird 11/11 post, dan 16 post ber-views di 5 akun
+               -- yang play count-nya sudah ada tapi dibuang).
+               (u.is_collaboration IS NOT TRUE) AS lolos_konten
         FROM l1_silver.unified_post u
         JOIN public.platforms pl
           ON pl.id = u.platform_id AND pl.key = '{platform_key}'
@@ -288,11 +311,13 @@ _VIEWS_VALID = "views > 0"
 # `views > 0` bernilai NULL untuk views NULL, dan FILTER membuang NULL, jadi
 # satu syarat ini sekaligus menutup kasus NULL -- tidak perlu IS NOT NULL lagi.
 
-# Penyebut Avg & Median.
-_S_VIEWS = f"lolos AND {_VIEWS_VALID}"
+# Penyebut Avg & Median. `lolos_konten`, bukan `lolos`: play count dilaporkan
+# platform secara terpisah dari like, jadi like yang disembunyikan tidak
+# membuat jumlah penonton tidak diketahui.
+_S_VIEWS = f"lolos_konten AND {_VIEWS_VALID}"
 
 # V2F: tambah syarat followers diketahui dan bukan nol.
-_S_V2F = (f"lolos AND {_VIEWS_VALID} "
+_S_V2F = (f"lolos_konten AND {_VIEWS_VALID} "
           "AND followers_count IS NOT NULL AND followers_count > 0")
 
 # L2V: tambah syarat likes diketahui.
@@ -360,7 +385,9 @@ _VIEW_METRIC_UPDATE = ",\n        ".join(
 #
 # Karena itu `paid_signal_count` ikut disimpan: tanpa itu, Paid Ratio 0%
 # tidak bisa dibedakan dari "tidak ada satu pun post yang diketahui".
-_S_PAID = "lolos AND is_sponsored IS NOT NULL"
+# `lolos_konten`: penanda endorse dibawa caption/platform dan tidak ada
+# hubungannya dengan apakah like ditampilkan.
+_S_PAID = "lolos_konten AND is_sponsored IS NOT NULL"
 _PAID_N = f"count(*) FILTER (WHERE {_S_PAID} AND is_sponsored)"
 _PAID_D = f"count(*) FILTER (WHERE {_S_PAID})"
 _PAID_RATIO = f"round({_PAID_N}::numeric / NULLIF({_PAID_D}, 0) * 100, 2)"
@@ -407,7 +434,8 @@ _SHARE_RATE = f"round({_SHARE_N}::numeric / NULLIF({_SHARE_D}, 0) * 100, 4)"
 # Tanggal diambil dalam WIB (Asia/Jakarta), sama seperti post_date di L2.
 # `posted_at::date` mengikuti TimeZone sesi (Etc/UTC di DB kol), sehingga post
 # yang tayang pagi WIB jatuh ke hari sebelumnya dan rentangnya melebar.
-_S_FREQ = "lolos AND posted_at IS NOT NULL"
+# `lolos_konten`: kapan akun memposting tidak bergantung pada like.
+_S_FREQ = "lolos_konten AND posted_at IS NOT NULL"
 _FREQ_N = f"count(*) FILTER (WHERE {_S_FREQ})"
 _TGL_WIB = "(posted_at AT TIME ZONE 'Asia/Jakarta')::date"
 _OBS_DAYS = f"""(max({_TGL_WIB}) FILTER (WHERE {_S_FREQ})
@@ -536,7 +564,7 @@ _FORMAT_NORM = """CASE lower(btrim(media_type))
 #: media_type-nya tidak dikenali tidak pernah jadi jawaban -- akun yang
 #: SELURUH postnya tidak dikenali mendapat NULL, bukan kategori palsu.
 _FORMAT_DOMINAN = (f"mode() WITHIN GROUP (ORDER BY {_FORMAT_NORM}) "
-                   f"FILTER (WHERE lolos)")
+                   f"FILTER (WHERE lolos_konten)")
 
 _METRIK_039 = f"""{_SAVE_RATE}      AS save_rate,
                {_SAVE_N}         AS saves_total,
@@ -777,9 +805,13 @@ SQL_POST_UNTUK_TOPIK = """
 #: diklasifikasikan. Ditandai berbeda di `content_topic_source` karena memang
 #: bukan hasil klasifikasi konten: kategori creator ditetapkan manusia saat
 #: impor roster, dan menyamakannya dengan topik konten akan menyesatkan.
+#: `lower()`: topik dari konten selalu huruf kecil (kunci lexicon), sementara
+#: `taxonomy_key` roster memakai kapitalisasi aslinya. Tanpa disamakan, satu
+#: nilai yang sama muncul dua ejaan -- 'Beauty' dari fallback di samping
+#: 'beauty' dari konten -- dan filter mana pun memecahnya jadi dua pilihan.
 SQL_KATEGORI_FALLBACK = """
     SELECT ksa.social_account_id,
-           min(c.taxonomy_key) AS taxonomy_key
+           lower(min(c.taxonomy_key)) AS taxonomy_key
       FROM public.kol_social_account ksa
       JOIN public.kol_directory k ON k.id = ksa.kol_id
       JOIN public.kol_categories c ON c.id = ANY(k.category_ids)

@@ -275,12 +275,19 @@ def test_definisi_views_valid_hanya_satu_tempat():
     assert FE["_VIEWS_VALID"] in FE["_S_L2V"]
 
 
-def test_semua_metrik_berangkat_dari_aturan_sampel_yang_sama():
-    """`lolos` = bukan likes_hidden, bukan kolaborasi. Aturan yang sudah
-    disepakati dan dipakai ER; keempat metrik baru tidak boleh menyimpang."""
-    for nama in ("_S_VIEWS", "_S_V2F", "_S_L2V"):
-        assert FE[nama].startswith("lolos AND"), \
-            f"{nama} tidak berangkat dari aturan sampel `lolos`"
+def test_metrik_views_memakai_sampel_konten_bukan_sampel_engagement():
+    """Play count dilaporkan platform terpisah dari like.
+
+    Avg/Median/V2F karena itu berangkat dari `lolos_konten` (bukan kolaborasi),
+    BUKAN `lolos` (yang juga membuang like tersembunyi). L2V tetap `lolos`
+    karena pembilangnya memang likes, dan ia sudah mensyaratkan
+    `likes IS NOT NULL` sendiri.
+    """
+    for nama in ("_S_VIEWS", "_S_V2F"):
+        assert FE[nama].startswith("lolos_konten AND"), \
+            f"{nama} harus berangkat dari `lolos_konten`"
+    assert FE["_S_L2V"].startswith("lolos AND"), \
+        "_S_L2V tetap memakai sampel engagement"
 
 
 def test_gold_profile_membawa_kolom_ke_l2():
@@ -349,28 +356,35 @@ def conn():
 
 #: Kolom CTE `post` yang dipakai ekspresi produksi. Namanya harus sama persis
 #: seperti yang dihasilkan `_cte_dasar()` di asset.
-_KOLOM_POST = "likes, views, followers_count, lolos"
+_KOLOM_POST = "likes, views, followers_count, lolos, lolos_konten"
 
 #: Tipe kolom, sama seperti di `l1_silver.unified_post`. Daftar kolom sebuah
 #: CTE tidak boleh menyebut tipe, jadi tipenya dipasang sebagai cast di baris
 #: VALUES PERTAMA -- dari situ Postgres menurunkan tipe seluruh kolom. Tanpa
 #: cast ini, kolom yang baris pertamanya NULL akan bertipe `text` dan
 #: `sum()`/`percentile_cont()` menolaknya.
-_TIPE_POST = ("bigint", "bigint", "bigint", "boolean")
+_TIPE_POST = ("bigint", "bigint", "bigint", "boolean", "boolean")
 
 
 def hitung(conn, baris):
     """Jalankan KELIMA ekspresi produksi atas `baris` buatan.
 
-    `baris` adalah list of (likes, views, followers_count, lolos).
-    Mengembalikan dict berisi kelima hasil.
+    `baris` adalah list of (likes, views, followers_count, lolos) atau
+    (likes, views, followers_count, lolos, lolos_konten).
+
+    Baris berkolom empat memakai `lolos` untuk KEDUA sampel, yaitu kasus di
+    mana post keluar sampel karena KOLABORASI. Itu menjaga arti seluruh test
+    yang ditulis sebelum `lolos_konten` ada. Post yang keluar sampel karena
+    like disembunyikan harus menyebut kolom kelima secara eksplisit -- dan
+    untuk post begitu, metrik views justru TIDAK boleh ikut hilang.
 
     CTE-nya dinamai `post` dan berkolom sama seperti `_cte_dasar()` di asset,
     sehingga ekspresi yang diimpor bisa ditempel apa adanya tanpa diubah
     satu karakter pun.
     """
+    baris = [tuple(r) + (tuple(r)[3],) if len(tuple(r)) == 4 else tuple(r) for r in baris]
     baris_pertama = "(" + ", ".join(f"%s::{t}" for t in _TIPE_POST) + ")"
-    sisanya = ["(%s, %s, %s, %s)"] * (len(baris) - 1)
+    sisanya = ["(%s, %s, %s, %s, %s)"] * (len(baris) - 1)
     nilai = ", ".join([baris_pertama] + sisanya)
     params = [v for r in baris for v in r]
     sql = f"""
@@ -394,7 +408,36 @@ def hitung(conn, baris):
     }
 
 
-# Baris = (likes, views, followers, lolos). `L` = lolos sampel.
+def test_like_tersembunyi_tidak_menghapus_play_count(conn):
+    """Regresi 23 September.
+
+    @rayanurfitrird menyembunyikan like di SELURUH 11 post-nya, dan @meisyasallwa
+    di sebagian. Play count keempat Reel mereka (23.419 / 63.176 / 24.271 /
+    92.593) tetap dilaporkan Instagram, tapi sampel lama membuangnya bersama
+    like -- sehingga avg/median views, viral, dan V2F ikut NULL padahal
+    angkanya ada. Yang tidak diketahui adalah ENGAGEMENT-nya, bukan penontonnya.
+
+    Baris di bawah: post ber-like tersembunyi -> lolos=False, lolos_konten=True.
+    """
+    h = hitung(conn, [
+        (None, 23419, 1000, False, True),    # like disembunyikan
+        (None, 63176, 1000, False, True),    # like disembunyikan
+        (500, 1000, 1000, False, False),     # kolaborasi: keluar dari KEDUA sampel
+    ])
+    assert h["n"] == 2, "post ber-like tersembunyi harus ikut dihitung views-nya"
+    assert h["avg_views"] == 43297.5
+    assert h["median_views"] == 43297.5
+    # L2V tetap NULL: likes-nya memang tidak diketahui.
+    assert h["l2v"] is None
+
+
+def test_kolaborasi_tetap_keluar_dari_metrik_views(conn):
+    """Yang dibuang tetap dibuang: konten kolaborasi sebagian milik akun lain."""
+    h = hitung(conn, [(100, 5000, 1000, False, False)])
+    assert h["n"] == 0 and h["avg_views"] is None and h["v2f"] is None
+
+
+# Baris = (likes, views, followers, lolos[, lolos_konten]). `L` = lolos sampel.
 L = True
 
 
