@@ -544,6 +544,7 @@ SQL_UPSERT = _CTE + """
        -- yang HANYA berubah di metrik baru dianggap tidak berubah dan upsert
        -- mengembalikan 0 -- kolomnya tetap NULL selamanya tanpa satu pun error.
        OR kol_profile_card.paid_ratio             IS DISTINCT FROM EXCLUDED.paid_ratio
+       OR kol_profile_card.paid_signal_count      IS DISTINCT FROM EXCLUDED.paid_signal_count
        OR kol_profile_card.share_rate             IS DISTINCT FROM EXCLUDED.share_rate
        OR kol_profile_card.post_frequency_monthly IS DISTINCT FROM EXCLUDED.post_frequency_monthly
        OR kol_profile_card.observation_days       IS DISTINCT FROM EXCLUDED.observation_days
@@ -555,6 +556,8 @@ SQL_UPSERT = _CTE + """
        OR kol_profile_card.projected_followers_30d
                                                   IS DISTINCT FROM EXCLUDED.projected_followers_30d
        OR kol_profile_card.previous_followers     IS DISTINCT FROM EXCLUDED.previous_followers
+       OR kol_profile_card.previous_snapshot_date
+                                                  IS DISTINCT FROM EXCLUDED.previous_snapshot_date
        OR kol_profile_card.days_between           IS DISTINCT FROM EXCLUDED.days_between
        -- Kolom migration 038. Wajib ikut, alasan yang sama dengan 037: tanpa
        -- ini baris yang hanya berubah di label dianggap tidak berubah.
@@ -571,10 +574,26 @@ SQL_UPSERT = _CTE + """
        -- berubah dan upsert mengembalikan 0 tanpa satu pun error.
        OR kol_profile_card.save_rate              IS DISTINCT FROM EXCLUDED.save_rate
        OR kol_profile_card.viral_frequency        IS DISTINCT FROM EXCLUDED.viral_frequency
+       OR kol_profile_card.viral_post_count       IS DISTINCT FROM EXCLUDED.viral_post_count
+       OR kol_profile_card.viral_threshold_views  IS DISTINCT FROM EXCLUDED.viral_threshold_views
        OR kol_profile_card.content_topic          IS DISTINCT FROM EXCLUDED.content_topic
+       OR kol_profile_card.content_topic_source   IS DISTINCT FROM EXCLUDED.content_topic_source
        OR kol_profile_card.format_dominant        IS DISTINCT FROM EXCLUDED.format_dominant
        OR kol_profile_card.audience_quality_tier  IS DISTINCT FROM EXCLUDED.audience_quality_tier
        OR kol_profile_card.audience_interest_top  IS DISTINCT FROM EXCLUDED.audience_interest_top
+       OR kol_profile_card.audience_interest_source
+                                                  IS DISTINCT FROM EXCLUDED.audience_interest_source
+       -- Kedua SKOR audiens ikut penjaga, bukan hanya TIER-nya. Keduanya ada
+       -- di daftar SET tapi tidak pernah ada di sini, sehingga kartu yang
+       -- HANYA berubah skornya dianggap tidak berubah dan angkanya tidak
+       -- pernah ditulis -- persis kegagalan diam yang diperingatkan komentar
+       -- migration 037/039 di atas. Terbukti 23 September: sesudah
+       -- `kol_profile_card` dimaterialisasi ulang, 34 kartu IG masih memakai
+       -- authenticity_score lama dan 27 audience_quality_score lama, satu di
+       -- antaranya NULL padahal feature punya nilainya.
+       OR kol_profile_card.audience_quality_score
+                                                  IS DISTINCT FROM EXCLUDED.audience_quality_score
+       OR kol_profile_card.authenticity_score     IS DISTINCT FROM EXCLUDED.authenticity_score
        OR kol_profile_card.performance_stability  IS DISTINCT FROM EXCLUDED.performance_stability
        OR kol_profile_card.er_stddev_pp           IS DISTINCT FROM EXCLUDED.er_stddev_pp
        -- `er_periods` ikut diperiksa terpisah: akun tanpa satu pun ER
