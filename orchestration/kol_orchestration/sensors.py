@@ -439,6 +439,13 @@ def l0_raw_new_data_sensor(context: SensorEvaluationContext,
     if menunggu:
         status = _status_run(context, menunggu["run_key"])
         if status == "berjalan":
+            # Sidik jari di cursor TIDAK dimajukan di sini. Data yang mendarat
+            # selama run berjalan belum tentu terbaca run itu; memajukan cursor
+            # ke `sekarang` membuat tick sesudah run selesai menganggapnya
+            # sudah diolah, dan data itu tertahan di L0 tanpa pemicu
+            # (terbukti 22 September: 1.450 follower TikTok). Dengan sidik
+            # lama, tick berikutnya membandingkan terhadap keadaan saat run
+            # diminta, jadi data susulan tetap terdeteksi sebagai baru.
             return SensorResult(
                 skip_reason=SkipReason(
                     f"Run {menunggu['run_key']} masih berjalan. Tick ini "
@@ -446,7 +453,7 @@ def l0_raw_new_data_sensor(context: SensorEvaluationContext,
                     f"bersamaan di atas data yang sama."
                 ),
                 cursor=_cursor_dengan_menunggu(
-                    cursor_baru, menunggu["run_key"], menunggu["percobaan"]),
+                    tulis_cursor(sebelumnya), menunggu["run_key"], menunggu["percobaan"]),
             )
         if status == "gagal":
             percobaan = menunggu["percobaan"] + 1

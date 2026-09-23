@@ -154,7 +154,11 @@ class ProfileScraper:
             usernames=list(usernames),
             _username_of=self.item_username,
         )
-        collected: dict[str, dict] = {}
+        # SEMUA item per username, bukan satu. Actor video/post mengembalikan N
+        # item untuk satu profil; menyimpan satu saja membuang item yang sudah
+        # ditagih (terbukti 22 September: 9 dari 10 video TikTok per akun
+        # hilang). Actor profil tetap menghasilkan satu item per username.
+        collected: dict[str, list[dict]] = {}
         last_error: str | None = None
 
         for attempt in range(1, self._max_retries + 2):
@@ -182,12 +186,17 @@ class ProfileScraper:
 
                 # Ambil isi dataset lebih dulu, apa pun statusnya. Run yang gagal
                 # di tengah jalan tetap meninggalkan profil yang sudah dibayar.
+                # Username yang sudah punya hasil dari attempt sebelumnya tidak
+                # dikirim ulang, jadi item baru hanya boleh menambah username
+                # yang belum ada -- mencegah duplikat kalau actor mengembalikan
+                # item milik username lain (mis. post kolaborasi).
+                sudah_ada = set(collected)
                 salvaged = 0
                 if run.default_dataset_id:
                     for item in self._fetch_dataset_items(run.default_dataset_id):
                         key = self.item_username(item)
-                        if key and key not in collected:
-                            collected[key] = item
+                        if key and key not in sudah_ada:
+                            collected.setdefault(key, []).append(item)
                             salvaged += 1
 
                 if status == SUCCEEDED and (salvaged or not self.empty_is_failure):
@@ -204,7 +213,7 @@ class ProfileScraper:
                         time.sleep(5)
                         continue
 
-                    result.items = list(collected.values())
+                    result.items = [i for daftar in collected.values() for i in daftar]
                     result.error = None
                     result.partial = attempt > 1
                     logger.info(
@@ -231,7 +240,7 @@ class ProfileScraper:
 
             except FATAL_ERRORS as exc:
                 # Token salah, kredit habis, atau actor tidak ada: percuma diulang.
-                result.items = list(collected.values())
+                result.items = [i for daftar in collected.values() for i in daftar]
                 result.error = f"{type(exc).__name__}: {exc}"
                 raise FatalApifyError(
                     f"Batch {batch_index} gagal permanen ({type(exc).__name__}): {exc}"
@@ -250,7 +259,7 @@ class ProfileScraper:
                     )
                     time.sleep(backoff)
 
-        result.items = list(collected.values())
+        result.items = [i for daftar in collected.values() for i in daftar]
         if collected:
             # Sebagian berhasil: jangan tandai gagal total, hasilnya tetap dipakai.
             result.partial = True

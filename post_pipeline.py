@@ -37,16 +37,18 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from apify_posts import InstagramPostScraper, TikTokVideoScraper
+from apify_posts import InstagramDetailsScraper, InstagramPostScraper, TikTokVideoScraper
 from apify_runner import FatalApifyError, chunked
 from config import ConfigError, default_max_cost_usd, load_config
 from run_lock import jalankan_terkunci
 from db import connect, dedupe_rows, fetch_usernames
 from post_errors import (
     ACTOR_ERROR,
+    PARTIAL,
     SUCCESS,
     classify_exception,
     classify_missing,
+    is_error_item,
 )
 from post_raw_store import insert_ig_posts, insert_tt_videos
 from scrape_log import AccountOutcome, ScrapeLogger
@@ -70,7 +72,12 @@ def _stamp() -> str:
 
 def _read_jsonl(path: Path) -> list[dict]:
     items: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # Iterasi file, BUKAN str.splitlines(): splitlines juga memotong di U+2028/
+    # U+2029 yang sah muncul di caption (json.dumps ensure_ascii=False menulisnya
+    # mentah), sehingga satu post terbelah jadi dua baris rusak dan hilang.
+    with path.open(encoding="utf-8", newline="\n") as fh:
+        baris = list(fh)
+    for line in baris:
         line = line.strip()
         if not line:
             continue
@@ -86,6 +93,55 @@ def _write_jsonl(path: Path, items) -> None:
     with path.open("w", encoding="utf-8") as fh:
         for item in items:
             fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def _input_of(platform: str, scraper, item: dict) -> str | None:
+    """Username yang DIMINTA (bukan pemilik) untuk satu item hasil actor.
+
+    TikTok membawa `input`; post Instagram membawa `inputUrl` (mode posts
+    aslinya, mode details ditempeli di `_posts_dari_details`). Dipakai hanya
+    untuk menghitung berapa item yang dikembalikan actor per akun yang diminta.
+    """
+    if platform == "tiktok":
+        v = item.get("input")
+        return normalize_username(v) if isinstance(v, str) else None
+    url = item.get("inputUrl")
+    return scraper.item_username({"inputUrl": url}) if url else None
+
+
+def _posts_dari_details(details: InstagramDetailsScraper, profil: list[dict],
+                        tersedia: dict[str, int]) -> list[dict]:
+    """Item profil mode `details` -> daftar post, terbaru dulu.
+
+    Sama dengan jalur `scheduler_engine`: post diambil dari `latestPosts`
+    lewat `posts_of`. Item error (akun tidak ada/privat) diteruskan apa adanya
+    supaya klasifikasi errornya tetap lewat `post_errors`. Profilnya sendiri
+    TIDAK ditulis -- pipeline ini hanya mengurus post.
+
+    `posts_of` mengembalikan daftar kosong untuk TIGA hal yang berbeda: item
+    error, akun privat, dan akun yang memang belum punya post. Hanya yang
+    pertama boleh diteruskan. Dua sisanya adalah objek profil yang sah --
+    punya `id` di level atas, jadi `is_error_item` menganggapnya post dan
+    `post_raw_store` menulisnya ke L0 sebagai post palsu ber-`media_id` id
+    AKUN, `posted_at` NULL. Karena itu penerusannya disaring dengan predikat
+    yang sama dengan yang dipakai penulisnya.
+    """
+    hasil: list[dict] = []
+    for item in profil:
+        posts = details.posts_of(item)
+        u = details.item_username(item)
+        # Dicatat sebelum `continue`: berapa post yang DIMILIKI akun tetap
+        # fakta yang berguna untuk menilai kekurangan, termasuk saat 0.
+        if u and isinstance(item.get("postsCount"), int):
+            tersedia[u] = item["postsCount"]
+        if not posts:
+            if is_error_item(item):
+                hasil.append(item)
+            continue
+        url = item.get("url") or item.get("inputUrl")
+        posts.sort(key=lambda p: p.get("timestamp") or "", reverse=True)
+        hasil.extend({**p, "inputUrl": p.get("inputUrl") or url} for p in posts)
+    return hasil
 
 
 def _build_scraper(platform: str, cfg, results: int, max_charge: float | None):
@@ -116,6 +172,25 @@ def _insert(platform: str, conn, items, username_of, actor, scraped_at, run_id,
 # --- inti: menyusun hasil per akun ------------------------------------------
 
 
+def _nilai_kekurangan(masuk: int, diminta: int, kembali: int,
+                      total_akun: int | None) -> tuple[str, str]:
+    """Status akun yang baris L0-nya < diminta.
+
+    success hanya kalau kekurangannya bisa dijelaskan data, bukan kegagalan:
+      - actor mengembalikan >= diminta, tapi sebagian milik akun lain dan
+        dibuang filter kepemilikan (filter itu tetap dipertahankan);
+      - akunnya memang hanya punya sebanyak itu post.
+    Selain itu `partial`.
+    """
+    if kembali >= diminta:
+        return SUCCESS, (f"{masuk}/{diminta} post: sisanya dari {kembali} post terbaru "
+                         f"milik akun lain (filter kepemilikan)")
+    if total_akun is not None and kembali >= total_akun:
+        return SUCCESS, f"{masuk}/{diminta} post: akun hanya punya {total_akun} post"
+    return PARTIAL, (f"actor hanya mengembalikan {kembali} item untuk akun ini "
+                     f"({masuk} masuk L0) dari {diminta} yang diminta")
+
+
 def build_outcomes(
     *,
     requested: dict[str, list],
@@ -125,12 +200,18 @@ def build_outcomes(
     batch_errors: dict[str, tuple[str, str]],
     started_at: datetime,
     finished_at: datetime,
+    requested_per_account: int | None = None,
+    returned: dict[str, int] | None = None,
+    available: dict[str, int] | None = None,
 ) -> list[AccountOutcome]:
     """Satu `AccountOutcome` untuk SETIAP username yang diminta.
 
     Urutan penentuan status, dari yang paling kuat buktinya:
 
-      1. ada baris L0 yang masuk        -> success
+      1. ada baris L0 yang masuk        -> success, atau `partial` kalau
+                                           barisnya kurang dari yang diminta
+                                           dan kekurangannya tidak bisa
+                                           dijelaskan data (lih. `_nilai_kekurangan`)
       2. ada item error dari actor      -> kode dari item itu
       3. batch-nya sendiri gagal        -> kode dari exception batch
       4. tidak ada jejak apa pun        -> unknown (bukan ditebak not_found)
@@ -153,6 +234,10 @@ def build_outcomes(
         masuk = per_account.get(username, 0)
         if masuk > 0:
             status, message = SUCCESS, None
+            if requested_per_account and returned is not None and masuk < requested_per_account:
+                status, message = _nilai_kekurangan(
+                    masuk, requested_per_account, returned.get(username, 0),
+                    (available or {}).get(username))
         elif username in by_username:
             status, message = by_username[username]
         elif username in batch_errors:
@@ -276,10 +361,16 @@ def _jalankan(args, cfg) -> int:
         # run yang sehat tetap menghasilkan 0 baris saat --no-write, dan run
         # yang benar-benar gagal fatal harus tetap terlihat gagal.
         fatal_error: str | None = None
+        tersedia: dict[str, int] = {}
         if not args.from_file:
+            # Instagram: mode `details` (sama dengan scheduler_engine), karena
+            # mode `posts` sekarang praktis hanya mengembalikan post yang di-pin.
+            pengambil = (InstagramDetailsScraper(cfg.apify, results_limit=args.results,
+                                                 max_charge_usd=args.max_charge_usd)
+                         if platform == "instagram" else scraper)
             for index, batch in enumerate(chunked(usernames, max(1, args.batch_size))):
                 try:
-                    result = scraper.scrape_batch(batch, batch_index=index)
+                    result = pengambil.scrape_batch(batch, batch_index=index)
                 except FatalApifyError as exc:
                     # Fatal = token/kredit/actor. Sisa batch percuma dicoba,
                     # tapi akun di batch ini tetap harus tercatat.
@@ -296,7 +387,10 @@ def _jalankan(args, cfg) -> int:
                     logger.warning("Batch %d gagal, lanjut ke batch berikutnya: %s", index, message)
                     continue
 
-                items_all.extend(result.items)
+                if platform == "instagram":
+                    items_all.extend(_posts_dari_details(pengambil, result.items, tersedia))
+                else:
+                    items_all.extend(result.items)
                 if result.error:
                     code, message = classify_exception(RuntimeError(result.error))
                     for u in result.missing:
@@ -315,7 +409,7 @@ def _jalankan(args, cfg) -> int:
         # --- tulis L0 --------------------------------------------------------
         if args.no_write:
             from post_raw_store import PostInsertStats
-            from post_errors import classify_item, is_error_item
+            from post_errors import classify_item
 
             table = "l0_raw.ig_media_snapshots_apify" if platform == "instagram" else "l0_raw.tt_video_apify"
             stats = PostInsertStats(scrape_run_id=run_id, table=table)
@@ -341,6 +435,18 @@ def _jalankan(args, cfg) -> int:
         finished_at = _now()
 
         # --- catat hasil per akun -------------------------------------------
+        kembali: dict[str, int] = {}
+        for item in items_all:
+            if is_error_item(item):
+                continue
+            u = _input_of(platform, scraper, item)
+            if u:
+                kembali[u] = kembali.get(u, 0) + 1
+            if platform == "tiktok":
+                meta = item.get("authorMeta") or {}
+                if u and isinstance(meta.get("video"), int):
+                    tersedia[u] = meta["video"]
+
         outcomes = build_outcomes(
             requested=requested,
             platform=platform,
@@ -349,6 +455,14 @@ def _jalankan(args, cfg) -> int:
             batch_errors=batch_errors,
             started_at=started_at,
             finished_at=finished_at,
+            # Penilaian `partial` hanya sah untuk run yang benar-benar
+            # memanggil actor. Pada replay `--from-file` jumlah post yang
+            # DIMILIKI akun tidak ikut di berkas (hanya post-nya sendiri),
+            # sehingga akun yang memang cuma punya 3 post akan dinilai
+            # kurang dari `--results` dan salah ditandai partial.
+            requested_per_account=None if args.from_file else args.results,
+            returned=kembali,
+            available=tersedia,
         )
 
         summary = None

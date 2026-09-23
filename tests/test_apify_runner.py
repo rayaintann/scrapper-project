@@ -150,6 +150,29 @@ class ScrapeBatch(unittest.TestCase):
         self.assertTrue(r.partial)
         self.assertAlmostEqual(r.cost_usd, 0.10)
 
+    def test_semua_item_per_username_disimpan(self):
+        # Regresi 22 September: actor video mengembalikan 10 item untuk satu
+        # profil; runner dulu menyimpan satu saja dan membuang 9 yang sudah dibayar.
+        video_a = [dict(hasil("a"), id=str(i)) for i in range(10)]
+        video_b = [dict(hasil("b"), id=f"b{i}") for i in range(7)]
+        r, fake = jalankan([("SUCCEEDED", video_a + video_b)], ["a", "b"])
+        self.assertEqual(len(r.items), 17)
+        self.assertEqual(sorted(i["id"] for i in r.items if i["authorMeta"]["name"] == "a"),
+                         sorted(str(i) for i in range(10)))
+        self.assertEqual(r.missing, [])
+        self.assertEqual(len(fake.panggilan), 1)
+
+    def test_retry_tidak_menggandakan_item_username_yang_sudah_ada(self):
+        # Attempt kedua hanya mengirim "b"; kalau datasetnya ikut membawa item
+        # "a" (mis. post kolaborasi), item itu tidak boleh menumpuk ke hasil "a".
+        r, fake = jalankan(
+            [("SUCCEEDED", [dict(hasil("a"), id="a1"), dict(hasil("a"), id="a2")]),
+             ("SUCCEEDED", [dict(hasil("b"), id="b1"), dict(hasil("a"), id="a9")])],
+            ["a", "b"],
+        )
+        self.assertEqual(fake.profil_dikirim, [["a", "b"], ["b"]])
+        self.assertEqual(sorted(i["id"] for i in r.items), ["a1", "a2", "b1"])
+
     def test_item_dari_run_gagal_tetap_diselamatkan(self):
         r, _ = jalankan(
             [("TIMED-OUT", [hasil("a")]), RuntimeError("gagal lagi"), RuntimeError("gagal lagi")],

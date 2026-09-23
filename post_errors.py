@@ -29,6 +29,10 @@ RATE_LIMIT = "rate_limit"
 TIMEOUT = "timeout"
 ACTOR_ERROR = "actor_error"
 UNKNOWN = "unknown"
+# Sebagian post masuk, tapi actor mengembalikan lebih sedikit dari yang diminta
+# padahal akunnya punya lebih banyak (bukan karena filter kepemilikan).
+# Sengaja BUKAN success: 1 dari 10 post pernah tercatat "success".
+PARTIAL = "partial"
 
 ERROR_CODES = (
     NOT_FOUND,
@@ -37,6 +41,7 @@ ERROR_CODES = (
     TIMEOUT,
     ACTOR_ERROR,
     UNKNOWN,
+    PARTIAL,
 )
 ALL_CODES = (SUCCESS,) + ERROR_CODES
 

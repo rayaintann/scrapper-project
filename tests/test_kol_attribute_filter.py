@@ -296,10 +296,16 @@ def test_db_kol_categories_tidak_tersentuh(conn):
 
 @pytest.mark.needs_db
 def test_db_filter_produksi_valid_sql(conn):
-    """Mapping masih 0 baris, jadi hasilnya 0 — yang diuji di sini query-nya
-    berjalan terhadap schema sungguhan."""
+    """Query-nya berjalan terhadap schema sungguhan, dan setiap KOL yang lolos
+    memang punya atribut itu di kol_attribute_map (sejak migration 052 map
+    berisi baris source='creator_classification', jadi hasilnya tidak lagi 0)."""
     hasil = db.search_kol_directory(conn, style=STYLE_EDU, limit=10)
-    assert hasil == []
+    with conn.cursor() as cur:
+        cur.execute("""SELECT DISTINCT m.kol_directory_id::text FROM public.kol_attribute_map m
+                         JOIN public.kol_attribute a ON a.id = m.kol_attribute_id
+                        WHERE a.attribute_key = %s""", (STYLE_EDU,))
+        punya = {r[0] for r in cur.fetchall()}
+    assert all(r.id in punya for r in hasil)
 
 
 @pytest.mark.needs_db

@@ -6,7 +6,7 @@ Offline: tidak menyentuh Apify maupun database.
 import unittest
 from datetime import datetime, timezone
 
-from post_errors import NOT_FOUND, RATE_LIMIT, SUCCESS, UNKNOWN
+from post_errors import NOT_FOUND, PARTIAL, RATE_LIMIT, SUCCESS, UNKNOWN
 from post_pipeline import build_outcomes
 from post_raw_store import PostInsertStats, _partition
 
@@ -159,6 +159,128 @@ class PenyaringanSebelumL0(unittest.TestCase):
         usable = _partition(items, lambda i: None, self.stats)
         self.assertEqual(usable, [])
         self.assertEqual(self.stats.skipped_no_username, 1)
+
+
+class KekuranganPostTidakDilaporkanSukses(unittest.TestCase):
+    """Regresi 22 September: akun yang hanya dapat 1 dari 10 post tercatat success."""
+
+    def _satu(self, masuk, kembali, total=None):
+        [o] = build_outcomes(
+            requested={"a": [Row("k1", "a")]}, platform="instagram",
+            per_account={"a": masuk}, item_errors=[], batch_errors={},
+            started_at=T0, finished_at=T1, requested_per_account=10,
+            returned={"a": kembali}, available={"a": total} if total is not None else {},
+        )
+        return o
+
+    def test_actor_mengembalikan_terlalu_sedikit_jadi_partial(self):
+        o = self._satu(masuk=1, kembali=1, total=500)
+        self.assertEqual(o.status, PARTIAL)
+        self.assertFalse(o.ok)
+
+    def test_kekurangan_karena_filter_kepemilikan_tetap_sukses(self):
+        o = self._satu(masuk=6, kembali=12, total=500)
+        self.assertEqual(o.status, SUCCESS)
+        self.assertIn("kepemilikan", o.message)
+
+    def test_akun_memang_punya_sedikit_post_tetap_sukses(self):
+        o = self._satu(masuk=1, kembali=1, total=1)
+        self.assertEqual(o.status, SUCCESS)
+
+    def test_target_penuh_sukses_tanpa_pesan(self):
+        o = self._satu(masuk=10, kembali=12, total=500)
+        self.assertEqual((o.status, o.message), (SUCCESS, None))
+
+    def test_tanpa_info_kembali_perilaku_lama(self):
+        [o] = outcomes({"a": [Row("k1", "a")]}, per_account={"a": 1})
+        self.assertEqual(o.status, SUCCESS)
+
+
+class BacaJsonlTahanPemisahBarisUnicode(unittest.TestCase):
+    def test_caption_dengan_u2028_tidak_terbelah(self):
+        import json, tempfile, pathlib
+        from post_pipeline import _read_jsonl, _write_jsonl
+        item = {"id": "1", "caption": "baris satu baris dua tiga"}
+        with tempfile.TemporaryDirectory() as d:
+            f = pathlib.Path(d) / "x.jsonl"
+            _write_jsonl(f, [item, {"id": "2"}])
+            self.assertEqual(_read_jsonl(f), [item, {"id": "2"}])
+
+
+class PostDariModeDetails(unittest.TestCase):
+    def test_latestposts_diurutkan_terbaru_dan_membawa_input(self):
+        from post_pipeline import _posts_dari_details
+        from apify_posts import InstagramDetailsScraper, InstagramPostScraper
+        from config import ApifyConfig
+        d = InstagramDetailsScraper(ApifyConfig(token="x", actor_id="apify/instagram-scraper", include_about_section=False))
+        profil = {"username": "a", "url": "https://www.instagram.com/a", "postsCount": 40,
+                  "latestPosts": [{"id": "lama", "timestamp": "2026-01-01T00:00:00Z"},
+                                  {"id": "baru", "timestamp": "2026-09-01T00:00:00Z",
+                                   "ownerUsername": "kolaborator"}]}
+        error = {"url": "https://www.instagram.com/b", "error": "not_found"}
+        tersedia = {}
+        hasil = _posts_dari_details(d, [profil, error], tersedia)
+        self.assertEqual([h.get("id") for h in hasil], ["baru", "lama", None])
+        # Pemilik kolaborasi tidak ditimpa -- filter kepemilikan tetap bekerja.
+        self.assertEqual(hasil[0]["ownerUsername"], "kolaborator")
+        self.assertEqual(hasil[1]["ownerUsername"], "a")
+        self.assertEqual(InstagramPostScraper(ApifyConfig(token="x", actor_id="y", include_about_section=False)).item_username(
+            {"inputUrl": hasil[0]["inputUrl"]}), "a")
+        self.assertEqual(tersedia, {"a": 40})
+
+    def test_profil_tanpa_post_tidak_diteruskan_sebagai_post(self):
+        """Akun privat / 0 post TIDAK boleh lolos jadi baris L0.
+
+        `posts_of` mengembalikan [] untuk tiga hal berbeda: item error, akun
+        privat, dan akun tanpa post. Objek profil yang dua terakhir punya `id`
+        di level atas, jadi `is_error_item` menganggapnya post sah dan
+        `post_raw_store` akan menulisnya ke L0 sebagai post palsu ber-media_id
+        id AKUN dan posted_at NULL. Hanya item error yang boleh diteruskan.
+        """
+        from post_pipeline import _posts_dari_details
+        from post_errors import is_error_item
+        from apify_posts import InstagramDetailsScraper
+        from config import ApifyConfig
+        d = InstagramDetailsScraper(ApifyConfig(
+            token="x", actor_id="apify/instagram-scraper", include_about_section=False))
+        privat = {"id": "17841400000000001", "username": "privat",
+                  "url": "https://www.instagram.com/privat", "private": True,
+                  "postsCount": 12, "latestPosts": []}
+        kosong = {"id": "17841400000000002", "username": "kosong",
+                  "url": "https://www.instagram.com/kosong", "postsCount": 0}
+        error = {"url": "https://www.instagram.com/hilang", "error": "not_found"}
+        # Prasyarat bug: objek profil ini memang lolos penjaga penulis L0.
+        self.assertFalse(is_error_item(privat))
+        self.assertFalse(is_error_item(kosong))
+
+        tersedia = {}
+        hasil = _posts_dari_details(d, [privat, kosong, error], tersedia)
+
+        # Hanya item error yang diteruskan; tidak ada objek profil.
+        self.assertEqual(len(hasil), 1)
+        self.assertEqual(hasil[0].get("error"), "not_found")
+        self.assertNotIn("17841400000000001", [h.get("id") for h in hasil])
+        self.assertNotIn("17841400000000002", [h.get("id") for h in hasil])
+        # postsCount tetap dicatat walau tidak ada post yang dibawa.
+        self.assertEqual(tersedia, {"privat": 12, "kosong": 0})
+
+
+class ReplayDariFileTidakDinilaiPartial(unittest.TestCase):
+    def test_from_file_tidak_menandai_partial(self):
+        """Replay `--from-file` tidak membawa jumlah post yang DIMILIKI akun,
+        jadi akun yang memang hanya punya sedikit post tidak boleh dinilai
+        partial hanya karena isinya kurang dari `--results`."""
+        from post_pipeline import build_outcomes
+        from post_errors import SUCCESS, PARTIAL
+        from datetime import datetime, timezone
+        t = datetime(2026, 9, 22, tzinfo=timezone.utc)
+        kw = dict(requested={"a": []}, platform="instagram",
+                  per_account={"a": 3}, item_errors={}, batch_errors={},
+                  started_at=t, finished_at=t, returned={"a": 3}, available={})
+        # Run actor biasa: 3 dari 10 diminta, tanpa penjelasan -> partial.
+        self.assertEqual(build_outcomes(requested_per_account=10, **kw)[0].status, PARTIAL)
+        # Replay: requested_per_account None -> penilaian dilewati.
+        self.assertEqual(build_outcomes(requested_per_account=None, **kw)[0].status, SUCCESS)
 
 
 if __name__ == "__main__":

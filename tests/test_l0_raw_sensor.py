@@ -299,6 +299,62 @@ class TidakTriggerBerulang(unittest.TestCase):
                              "sensor tidak boleh menulis apa pun")
 
 
+class DataSaatRunBerjalanTidakTertelan(unittest.TestCase):
+    """Regresi 22 September: data yang mendarat SELAMA transform_chain_job masih
+    berjalan tertelan cursor, sehingga tidak pernah memicu run berikutnya.
+
+    Terjadi dua kali di uji cohort 100 KOL: 273 post IG dan 1.450 follower
+    TikTok tertahan di L0 sampai transform dijalankan manual.
+    """
+
+    def _tick(self, sidik_jari, cursor, status_run):
+        with mock.patch.object(sensors, "_status_run", return_value=status_run):
+            return evaluasi(sidik_jari, cursor)
+
+    def test_data_b_saat_run_a_berjalan_memicu_run_berikutnya(self):
+        awal = sidik(ig_profile_apify=952)
+        data_a = sidik(ig_profile_apify=952, ig_media_snapshots_apify=100)
+        data_b = sidik(ig_profile_apify=952, ig_media_snapshots_apify=100,
+                       tt_followers_apify=50)
+
+        # Data A -> sensor meminta run A.
+        tick_a = self._tick(data_a, tulis_cursor(awal), None)
+        self.assertEqual(len(tick_a.run_requests), 1)
+
+        # Data B mendarat saat run A masih berjalan -> tick ini boleh skip.
+        tick_saat_berjalan = self._tick(data_b, tick_a.cursor, "berjalan")
+        self.assertEqual(list(tick_saat_berjalan.run_requests or []), [])
+
+        # Run A selesai -> tick berikutnya WAJIB melihat B sebagai data baru.
+        tick_sesudah = self._tick(data_b, tick_saat_berjalan.cursor, "sukses")
+        self.assertEqual(len(tick_sesudah.run_requests), 1)
+        self.assertNotEqual(tick_sesudah.run_requests[0].run_key,
+                            tick_a.run_requests[0].run_key)
+        self.assertIn("tt_followers_apify",
+                      tick_sesudah.run_requests[0].tags["l0_raw/tabel_baru"])
+
+    def test_tanpa_data_baru_selama_run_tetap_tidak_memicu_ulang(self):
+        awal = sidik(ig_profile_apify=952)
+        data_a = sidik(ig_profile_apify=960)
+
+        tick_a = self._tick(data_a, tulis_cursor(awal), None)
+        tick_saat_berjalan = self._tick(data_a, tick_a.cursor, "berjalan")
+        tick_sesudah = self._tick(data_a, tick_saat_berjalan.cursor, "sukses")
+
+        self.assertEqual(list(tick_sesudah.run_requests or []), [])
+
+    def test_cursor_saat_berjalan_tetap_menunggu_run_yang_sama(self):
+        awal = sidik(ig_profile_apify=952)
+        data_a = sidik(ig_profile_apify=960)
+        data_b = sidik(ig_profile_apify=970)
+
+        tick_a = self._tick(data_a, tulis_cursor(awal), None)
+        tick_saat_berjalan = self._tick(data_b, tick_a.cursor, "berjalan")
+
+        self.assertEqual(sensors.baca_menunggu(tick_saat_berjalan.cursor),
+                         sensors.baca_menunggu(tick_a.cursor))
+
+
 # ===========================================================================
 # 4. Transformasi berjalan sampai L2
 # ===========================================================================

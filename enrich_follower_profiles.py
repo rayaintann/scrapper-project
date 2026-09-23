@@ -77,7 +77,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 
@@ -116,128 +116,104 @@ def parse_args(argv=None):
     p.add_argument("--cap-total", type=float, default=4.49,
                    help="Plafon biaya TOTAL yang disetujui, USD. Plafon per batch "
                         "diturunkan dari sini, bukan sebaliknya (default 4.49).")
+    p.add_argument("--akun-file", default=None, metavar="FILE",
+                   help="Batasi ke social_account_id KOL di file ini (satu per baris). "
+                        "Tanpa ini seluruh follower L1 platform itu jadi target.")
+    p.add_argument("--hanya-belum", action="store_true",
+                   help="Lewati username yang sudah pernah diperkaya actor ini -- "
+                        "profilnya sudah dibayar, termasuk yang bio-nya memang kosong.")
+    p.add_argument("--lewati-file", default=None, metavar="FILE",
+                   help="Username yang TIDAK boleh dikirim ke actor (satu per baris), mis. "
+                        "semua username yang sudah pernah dibayar. --hanya-belum saja tidak "
+                        "cukup: profil privat/terhapus tidak pernah tertulis ke L0, jadi "
+                        "tanpa ini mereka dikirim -- dan ditagih -- ulang tiap batch.")
+    p.add_argument("--maks-batch", type=int, default=None, metavar="N",
+                   help="Berhenti setelah N batch. Dipakai untuk menjalankan satu "
+                        "batch per proses dan memeriksa kondisi mesin di antaranya.")
+    p.add_argument("--dari-run", default=None, metavar="RUN_ID",
+                   help="Tulis dari dataset run Apify yang SUDAH dibayar, tanpa "
+                        "memanggil actor (pemulihan run yang terputus sebelum ditulis).")
     p.add_argument("--dry-run", action="store_true",
                    help="Tampilkan target dan estimasi biaya lalu berhenti. Nol biaya.")
     p.add_argument("--yes", action="store_true", help="Lewati konfirmasi biaya.")
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
-    args = parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    cfg = load_config()
+SQL_SUDAH_DIPERKAYA = """
+    SELECT DISTINCT username FROM l0_raw.ig_followers_apify
+     WHERE source_actor = %s AND username IS NOT NULL
+"""
 
-    conn = _conn()
+
+#: `scraped_at` TERAKHIR baris asli (actor follower-list) per (akun, follower,
+#: tanggal). Dibaca supaya baris enrichment bisa ditempatkan SESUDAHNYA.
+SQL_SCRAPED_ASLI = """
+    SELECT social_account_id::text, followers_ig_id,
+           (scraped_at AT TIME ZONE 'UTC')::date, max(scraped_at)
+      FROM l0_raw.ig_followers_apify
+     WHERE source_actor IS DISTINCT FROM %s AND social_account_id::text = ANY(%s)
+     GROUP BY 1, 2, 3
+"""
+
+
+def _scraped_at(tgl, asli: datetime | None = None) -> datetime:
+    """`scraped_at` baris enrichment untuk satu baris follower.
+
+    Dua syarat, keduanya dari `sp_sync_instagram_follower`:
+
+    1. TANGGAL sama dengan baris itu -- kunci konflik harmonization adalah
+       (akun, follower, date). Dulu satu tanggal dipakai untuk semua baris
+       (`baris[0][3]`), sehingga follower tanggal lain tidak pernah tergabung.
+    2. WAKTU sesudah baris asli -- procedure hanya meng-update kalau
+       `processed_at` baru lebih besar, dan `processed_at` grup = `scraped_at`
+       terbaru. Jam 12:00 tetap (desain lama) membuat enrichment untuk baris
+       yang di-scrape sore hari tidak pernah diterapkan (22 September: 7 bio).
+
+    Maka: 1 detik sesudah baris asli, dibatasi tetap di tanggal yang sama;
+    tanpa baris asli, 12:00 UTC seperti sebelumnya.
+    """
+    siang = datetime(tgl.year, tgl.month, tgl.day, 12, 0, 0, tzinfo=timezone.utc)
+    if asli is None:
+        return siang
+    akhir_hari = datetime(tgl.year, tgl.month, tgl.day, 23, 59, 59, 999999, tzinfo=timezone.utc)
+    return max(siang, min(asli + timedelta(seconds=1), akhir_hari))
+
+
+def _tulis_batch(conn, run_id: str, items: dict, peta: dict, sekarang: datetime,
+                 hasil: dict) -> None:
+    """Tulis satu batch lalu COMMIT. Batch berikutnya gagal pun, yang ini tetap.
+
+    Angkanya dikumpulkan LOKAL dan baru digabung ke `hasil` sesudah COMMIT
+    berhasil. Kalau ditambahkan langsung, batch yang di-rollback caller tetap
+    meninggalkan hitungannya, dan laporan akhir mengaku menulis baris yang
+    sebenarnya tidak ada di database -- justru pada pekerjaan yang tugasnya
+    mempertanggungjawabkan profil berbayar.
+    """
+    lokal = {"berhasil_user": 0, "gagal_user": [], "id_beda": [], "err_item": 0,
+             "ditulis": 0, "dihapus": 0}
     with conn.cursor() as cur:
-        cur.execute(SQL_TARGET, (args.platform,))
-        baris = cur.fetchall()
-
-    if not baris:
-        print("Tidak ada follower yang bisa diperkaya.")
-        conn.close()
-        return 1
-
-    # username -> daftar (social_account_id, follower_platform_id, date)
-    peta: dict[str, list[tuple]] = {}
-    for uname, sid, pid, tgl in baris:
-        peta.setdefault(uname, []).append((sid, pid, tgl))
-
-    usernames = sorted(peta)
-    estimasi = len(usernames) * PRICE_PER_PROFILE_USD
-    print(f"Baris follower L1 : {len(baris)}")
-    print(f"Username unik     : {len(usernames)}")
-    print(f"Estimasi biaya    : ${estimasi:.2f} "
-          f"(${PRICE_PER_PROFILE_USD}/profil)")
-
-    if args.dry_run:
-        print("\ncontoh 10 username:", usernames[:10])
-        conn.close()
-        return 0
-
-    if not args.yes:
-        print("Jalankan ulang dengan --yes untuk melanjutkan.")
-        conn.close()
-        return 0
-
-    # Plafon per batch DITURUNKAN dari plafon total yang disetujui, bukan dari
-    # rumus 1.5x di pipeline.py. Rumus itu menghasilkan $0.39/batch x 13 batch =
-    # $5.07, di atas plafon yang disetujui. Membagi plafon total ke jumlah batch
-    # membuat batas yang disetujui benar-benar mengikat.
-    jml_batch = max(1, (len(usernames) + args.batch_size - 1) // args.batch_size)
-    plafon = round(args.cap_total / jml_batch, 4)
-    scraper = InstagramProfileScraper(cfg.apify, actor_id=ACTOR_IG,
-                                      max_charge_usd=plafon)
-    print(f"Plafon total      : ${args.cap_total} (disetujui)")
-    print(f"Plafon per batch  : ${plafon} x {jml_batch} batch")
-
-    run_id = str(uuid.uuid4())
-    # Tanggal DISAMAKAN dengan baris follower yang sudah ada, supaya digabung
-    # dan bukan membuat baris harmonization baru.
-    tgl_kunci = baris[0][3]
-    scraped_at = datetime(tgl_kunci.year, tgl_kunci.month, tgl_kunci.day,
-                          12, 0, 0, tzinfo=timezone.utc)
-    print(f"scrape_run_id     : {run_id}")
-    print(f"scraped_at dipakai: {scraped_at.isoformat()} (mengikuti baris lama)")
-
-    chunks = chunked(usernames, args.batch_size)
-    print(f"Total batch       : {len(chunks)}\n")
-
-    semua_item: dict[str, dict] = {}
-    total_biaya = 0.0
-    gagal_batch = 0
-
-    for i, chunk in enumerate(chunks, 1):
-        try:
-            b = scraper.scrape_batch(chunk, batch_index=i)
-        except Exception as exc:  # noqa: BLE001
-            gagal_batch += 1
-            logger.error("Batch %d gagal: %s", i, exc)
-            continue
-        if b.cost_usd:
-            total_biaya += b.cost_usd
-        for it in b.items:
-            u = (it.get("username") or "").strip()
-            if u:
-                semua_item[u] = it
-        logger.info("Batch %d/%d: %d item, biaya $%.4f (kumulatif $%.4f)",
-                    i, len(chunks), len(b.items), b.cost_usd or 0.0, total_biaya)
-
-    # --- tulis ke L0 --------------------------------------------------------
-    ditulis = 0
-    berhasil_user = 0
-    gagal_user: list[str] = []
-    id_beda: list[tuple] = []
-    err_item = 0
-    sekarang = datetime.now(timezone.utc)
-
-    with conn.cursor() as cur:
-        # Bersihkan hasil enrichment sebelumnya untuk tanggal & actor yang sama,
-        # supaya menjalankan ulang MENGGANTI hasil enrichment, bukan menumpuk.
-        # Baris dari actor follower-list TIDAK ikut karena source_actor beda.
-        cur.execute("""DELETE FROM l0_raw.ig_followers_apify
-                       WHERE source_actor = %s
-                         AND (scraped_at AT TIME ZONE 'UTC')::date = %s""",
-                    (ACTOR_IG, scraped_at.date()))
-        dihapus = cur.rowcount or 0
-
-        for uname in usernames:
-            item = semua_item.get(uname)
-            if item is None:
-                gagal_user.append(uname)
-                continue
+        for uname, item in items.items():
             if item.get("error"):
-                err_item += 1
+                lokal["err_item"] += 1
             m = petakan(item, "instagram")
             if not (m["bio"] or m["followers_count"] is not None
                     or m["following_count"] is not None):
                 # Tidak ada satu pun field yang kita cari -> tidak berguna.
-                gagal_user.append(uname)
+                lokal["gagal_user"].append(uname)
                 continue
-            berhasil_user += 1
-
-            for sid, pid, _tgl in peta[uname]:
+            lokal["berhasil_user"] += 1
+            for sid, pid, tgl, asli in peta[uname]:
                 if m["follower_id"] and m["follower_id"] != pid:
-                    id_beda.append((uname, pid, m["follower_id"]))
+                    lokal["id_beda"].append((uname, pid, m["follower_id"]))
+                scraped_at = _scraped_at(tgl, asli)
+                # Rerun MENGGANTI enrichment pasangan ini saja; baris dari actor
+                # follower-list (source_actor beda) tidak tersentuh.
+                cur.execute("""DELETE FROM l0_raw.ig_followers_apify
+                               WHERE source_actor = %s AND social_account_id = %s
+                                 AND followers_ig_id = %s
+                                 AND (scraped_at AT TIME ZONE 'UTC')::date = %s""",
+                            (ACTOR_IG, sid, pid, scraped_at.date()))
+                lokal["dihapus"] += cur.rowcount or 0
                 cur.execute("""
                     INSERT INTO l0_raw.ig_followers_apify (
                         social_account_id, scrape_run_id, followers_ig_id, username,
@@ -253,28 +229,197 @@ def main(argv=None) -> int:
                      m["following_count"], m["bio"], m["email"], m["phones"],
                      m["social_links"], json.dumps(item, ensure_ascii=False),
                      scraped_at, ACTOR_IG, sekarang))
-                ditulis += 1
+                lokal["ditulis"] += 1
     conn.commit()
+    # Hanya sesudah COMMIT: sejak titik ini angkanya benar-benar ada di DB.
+    for k, v in lokal.items():
+        if isinstance(v, list):
+            hasil[k].extend(v)
+        else:
+            hasil[k] += v
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    cfg = load_config()
+
+    conn = _conn()
+    akun = None
+    if args.akun_file:
+        with open(args.akun_file, encoding="utf-8") as fh:
+            akun = sorted({b.strip() for b in fh if b.strip()})
+    with conn.cursor() as cur:
+        if akun is None:
+            cur.execute(SQL_TARGET, (args.platform,))
+        else:
+            cur.execute(SQL_TARGET + " AND f.social_account_id::text = ANY(%s)",
+                        (args.platform, akun))
+        baris = cur.fetchall()
+        sudah: set[str] = set()
+        if args.hanya_belum:
+            cur.execute(SQL_SUDAH_DIPERKAYA, (ACTOR_IG,))
+            sudah = {r[0] for r in cur.fetchall()}
+        if args.lewati_file:
+            with open(args.lewati_file, encoding="utf-8") as fh:
+                sudah |= {b.strip() for b in fh if b.strip()}
+        cur.execute(SQL_SCRAPED_ASLI, (ACTOR_IG, sorted({str(b[1]) for b in baris})))
+        asli = {(sid, pid, tgl): ts for sid, pid, tgl, ts in cur.fetchall()}
+    # SELECT pun membuka transaksi. Tanpa ini koneksi menggantung
+    # "idle in transaction" selama actor batch pertama berjalan (menit-menit).
+    conn.rollback()
+
+    # username -> daftar (social_account_id, follower_platform_id, date, scraped_at asli)
+    peta: dict[str, list[tuple]] = {}
+    for uname, sid, pid, tgl in baris:
+        if uname in sudah:
+            continue
+        peta.setdefault(uname, []).append((sid, pid, tgl, asli.get((str(sid), pid, tgl))))
+
+    if not peta:
+        print("Tidak ada follower yang bisa diperkaya.")
+        conn.close()
+        return 1
+
+    usernames = sorted(peta)
+    estimasi = len(usernames) * PRICE_PER_PROFILE_USD
+    print(f"Akun KOL dibatasi : {len(akun) if akun is not None else 'tidak (semua)'}")
+    print(f"Baris follower L1 : {len(baris)}")
+    print(f"Sudah diperkaya   : {len(sudah & {b[0] for b in baris})} username dilewati")
+    print(f"Username target   : {len(usernames)}")
+    # Kalau kunci (akun, follower, tanggal) meleset -- mis. tipe kolom L0 dan
+    # L1 berbeda -- SEMUA baris diam-diam jatuh ke 12:00 dan bug yang sudah
+    # diperbaiki kembali tanpa satu pun error. Angka ini yang menampakkannya.
+    tanpa_asli = sum(1 for v in peta.values() for *_, a in v if a is None)
+    print(f"Tanpa scraped_at asli: {tanpa_asli} dari "
+          f"{sum(len(v) for v in peta.values())} baris (jatuh ke 12:00 UTC)")
+    print(f"Estimasi biaya    : ${estimasi:.2f} "
+          f"(${PRICE_PER_PROFILE_USD}/profil)")
+    print(f"Tanggal baris     : {sorted({str(t) for v in peta.values() for _s, _p, t, _a in v})}")
+
+    if args.dry_run:
+        print("\ncontoh 10 username:", usernames[:10])
+        conn.close()
+        return 0
+
+    if not args.yes:
+        print("Jalankan ulang dengan --yes untuk melanjutkan.")
+        conn.close()
+        return 0
+
+    if args.dari_run:
+        # Nol biaya: hanya membaca dataset run yang sudah dibayar.
+        from apify_client import ApifyClient
+        client = ApifyClient(cfg.apify.token)
+        run = client.run(args.dari_run).get()
+        ds = run.get("defaultDatasetId") if isinstance(run, dict) else run.default_dataset_id
+        items: dict[str, dict] = {}
+        for it in client.dataset(ds).iterate_items():
+            u = (dict(it).get("username") or "").strip()
+            if u in peta:
+                items[u] = dict(it)
+        hasil = {"berhasil_user": 0, "gagal_user": [], "id_beda": [], "err_item": 0,
+                 "ditulis": 0, "dihapus": 0}
+        _tulis_batch(conn, str(uuid.uuid4()), items, peta, datetime.now(timezone.utc), hasil)
+        conn.close()
+        print(f"PEMULIHAN run {args.dari_run}: {len(items)} profil cocok target, "
+              f"{hasil['berhasil_user']} berguna, {hasil['ditulis']} baris ditulis, "
+              f"id beda {len(hasil['id_beda'])}")
+        return 0
+
+    # Potong dulu, baru periksa plafon. `--maks-batch` ada justru untuk
+    # menjalankan sebagian target ketika keseluruhannya TIDAK muat di plafon;
+    # kalau plafon diuji atas seluruh target, opsi itu selalu ditolak persis
+    # pada satu-satunya keadaan yang membuatnya berguna.
+    chunks = chunked(usernames, args.batch_size)
+    total_batch = len(chunks)
+    if args.maks_batch is not None:
+        chunks = chunks[:args.maks_batch]
+    akan_dijalankan = sum(len(c) for c in chunks)
+    biaya_dijalankan = akan_dijalankan * PRICE_PER_PROFILE_USD
+
+    if biaya_dijalankan > args.cap_total:
+        print(f"DIHENTIKAN: estimasi ${biaya_dijalankan:.2f} untuk {akan_dijalankan} "
+              f"profil melewati plafon ${args.cap_total:.2f}.")
+        conn.close()
+        return 3
+
+    # Plafon per batch DITURUNKAN dari plafon total yang disetujui, bukan dari
+    # rumus 1.5x di pipeline.py. Rumus itu menghasilkan $0.39/batch x 13 batch =
+    # $5.07, di atas plafon yang disetujui. Membagi plafon total ke jumlah batch
+    # membuat batas yang disetujui benar-benar mengikat.
+    jml_batch = max(1, len(chunks))
+    plafon = round(args.cap_total / jml_batch, 4)
+    scraper = InstagramProfileScraper(cfg.apify, actor_id=ACTOR_IG,
+                                      max_charge_usd=plafon)
+    print(f"Plafon total      : ${args.cap_total} (disetujui)")
+    print(f"Plafon per batch  : ${plafon} x {jml_batch} batch")
+
+    run_id = str(uuid.uuid4())
+    print(f"scrape_run_id     : {run_id}")
+    print("scraped_at dipakai: tanggal baris follower masing-masing, 1 detik "
+          "sesudah baris aslinya (minimum 12:00 UTC, maksimum akhir hari)")
+
+    print(f"Total batch       : {total_batch}")
+    if args.maks_batch is not None:
+        print(f"Dijalankan kali ini: {len(chunks)} batch (--maks-batch), "
+              f"{akan_dijalankan} profil, estimasi ${biaya_dijalankan:.2f}")
+    print()
+
+    hasil = {"berhasil_user": 0, "gagal_user": [], "id_beda": [], "err_item": 0,
+             "ditulis": 0, "dihapus": 0}
+    total_biaya = 0.0
+    gagal_batch = 0
+    sekarang = datetime.now(timezone.utc)
+
+    # Tulis & COMMIT per batch: proses yang terhenti di tengah tidak membuang
+    # profil yang sudah dibayar, dan memori tidak menampung seluruh hasil.
+    for i, chunk in enumerate(chunks, 1):
+        try:
+            b = scraper.scrape_batch(chunk, batch_index=i)
+        except Exception as exc:  # noqa: BLE001
+            gagal_batch += 1
+            logger.error("Batch %d gagal: %s", i, exc)
+            hasil["gagal_user"].extend(chunk)
+            continue
+        if b.cost_usd:
+            total_biaya += b.cost_usd
+        items: dict[str, dict] = {}
+        for it in b.items:
+            u = (it.get("username") or "").strip()
+            if u in peta:
+                items[u] = it
+        hasil["gagal_user"].extend(u for u in chunk if u not in items)
+        try:
+            _tulis_batch(conn, run_id, items, peta, sekarang, hasil)
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            gagal_batch += 1
+            logger.error("Batch %d gagal ditulis: %s", i, exc)
+            continue
+        logger.info("Batch %d/%d: %d profil, biaya $%.4f (kumulatif $%.4f), baris ditulis %d",
+                    i, len(chunks), len(items), b.cost_usd or 0.0, total_biaya,
+                    hasil["ditulis"])
     conn.close()
 
     print("\n" + "=" * 74)
     print("HASIL ENRICHMENT")
     print("=" * 74)
     print(f"  username target        : {len(usernames)}")
-    print(f"  profil kembali berguna : {berhasil_user}")
-    print(f"  gagal / tanpa field    : {len(gagal_user)}")
-    print(f"  item ber-error dr actor: {err_item}")
+    print(f"  profil kembali berguna : {hasil['berhasil_user']}")
+    print(f"  gagal / tanpa field    : {len(hasil['gagal_user'])}")
+    print(f"  item ber-error dr actor: {hasil['err_item']}")
     print(f"  batch gagal            : {gagal_batch}")
-    print(f"  baris L0 dihapus (rerun): {dihapus}")
-    print(f"  baris L0 ditulis       : {ditulis}")
-    print(f"  id L1 != id actor      : {len(id_beda)}")
+    print(f"  baris L0 dihapus (rerun): {hasil['dihapus']}")
+    print(f"  baris L0 ditulis       : {hasil['ditulis']}")
+    print(f"  id L1 != id actor      : {len(hasil['id_beda'])}")
     print(f"  biaya aktual           : ${total_biaya:.4f}")
     print(f"  estimasi               : ${estimasi:.4f}")
-    if gagal_user[:10]:
-        print(f"  contoh gagal           : {gagal_user[:10]}")
-    if id_beda[:5]:
-        print(f"  contoh id beda         : {id_beda[:5]}")
-    return 0
+    if hasil["gagal_user"][:10]:
+        print(f"  contoh gagal           : {hasil['gagal_user'][:10]}")
+    if hasil["id_beda"][:5]:
+        print(f"  contoh id beda         : {hasil['id_beda'][:5]}")
+    return 0 if not gagal_batch else 1
 
 
 if __name__ == "__main__":

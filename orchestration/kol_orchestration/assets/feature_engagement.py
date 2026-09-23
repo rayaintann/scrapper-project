@@ -756,14 +756,21 @@ def _sql_stats(platform_key: str) -> str:
 # Jalannya SETELAH upsert utama, sebagai UPDATE terpisah atas tabel yang sama.
 # Bukan pipeline baru, bukan tabel baru: satu pass tambahan di asset yang sama.
 #
-# ATURAN SAMPEL sama dengan metrik lain (`lolos`), dan sumbernya HANYA caption
-# + hashtag. Username dan display name tidak pernah dibaca -- "@nasigoreng.id"
-# bukan bukti bahwa kontennya tentang makanan.
+# Sumbernya HANYA caption + hashtag. Username dan display name tidak pernah
+# dibaca -- "@nasigoreng.id" bukan bukti bahwa kontennya tentang makanan.
+#
+# SAMPEL: post kolaborasi tetap dibuang (kontennya milik bersama, sama seperti
+# `lolos`). Post dengan like TERSEMBUNYI tidak lagi dibuang: like yang
+# disembunyikan membuat ENGAGEMENT tidak diketahui, bukan topik caption-nya.
+# Aturan lama menyamakan keduanya, sehingga akun yang menyembunyikan like di
+# semua post (22 September: @rayanurfitrird, 11/11 post) tidak punya topik
+# konten sama sekali walau caption-nya tersedia. Metrik engagement tetap
+# memakai `lolos` apa adanya.
 SQL_POST_UNTUK_TOPIK = """
     SELECT u.social_account_id, u.caption, u.hashtags
       FROM l1_silver.unified_post u
       JOIN public.platforms pl ON pl.id = u.platform_id AND pl.key = %s
-     WHERE u.likes_hidden IS NOT TRUE AND u.is_collaboration IS NOT TRUE
+     WHERE u.is_collaboration IS NOT TRUE
 """
 
 #: Kategori roster sebagai CADANGAN, dan hanya kalau tidak satu pun post bisa
@@ -903,7 +910,10 @@ def _jalankan(postgres: PostgresResource, platform_key: str, sql_upsert: str,
     kinds={"postgres"},
     description=(
         "feature.ig_engagement_analysis — engagement per akun Instagram. "
-        "Sampel mengecualikan post ber-likes_hidden dan post kolaborasi. "
+        "Sampel metrik engagement mengecualikan post ber-likes_hidden dan post "
+        "kolaborasi; sampel content_topic hanya mengecualikan post kolaborasi, "
+        "karena like tersembunyi membuat engagement tidak diketahui, bukan "
+        "topik caption-nya. "
         "Menghitung juga Avg Views, Median Views, V2F dan L2V; penyebutnya "
         "views_analyzed_count (post ber-views), bukan posts_analyzed_count — "
         "Instagram hanya melaporkan views untuk post video. "
