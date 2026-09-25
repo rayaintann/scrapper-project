@@ -310,3 +310,19 @@ def test_sql_writer_tidak_menyentuh_kolom_kurasi_atau_taxonomy():
         assert forbidden not in sqls, forbidden
     assert not re.search(r"(?<![\w])category_id\s*=", sqls)     # hanya inferred_category_id
     assert "source = 'creator_classification'" in W.SQL_MAP_DELETE
+
+
+# --- migration 054: baris kol_directory ber-source 'curated' tidak disentuh ----------
+def test_writer_melewati_baris_category_curated(tax, attr_ids):
+    kurasi = {"inferred_category_id": tax.by_code["BEA"].id, "inferred_subcategory_id": None,
+              "inferred_category_source": W.CURATED_SOURCE, "inferred_category_confidence": "low",
+              "inferred_subcategory_confidence": None, "inferred_category_evidence": {"basis": "workbook_review"}}
+    # classifier menghasilkan Food, lalu Unknown -- keduanya TIDAK boleh menimpa/membersihkan kurasi
+    for r in (res(tax, cat="FOD", sub="FOD.CUL"), res(tax)):
+        p = run_plan(tax, attr_ids, r, state=W.State({KOL: kurasi}, {}))
+        assert p.kd_updates == [] and p.cleared["creator_category"] == 0
+        assert p.skipped_curated["creator_category"] == 1
+
+
+def test_sql_update_writer_menjaga_baris_curated():
+    assert "inferred_category_source IS DISTINCT FROM 'curated'" in W.SQL_KD_UPDATE

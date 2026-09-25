@@ -137,6 +137,9 @@ TRANSFORM_ASSETS = (
     # persis kasus yang ditemukan audit 9 September untuk rantai follower di
     # atas.
     "audience_age_measured",
+    # Lokasi AUDIENS terukur (jalur A), pasangan audience_age_measured. Satu COUNT
+    # saat sumbernya kosong.
+    "audience_geo_measured",
     "creator_age",
     # Gender KREATOR (migration 051), pola yang sama dengan creator_age: jalan
     # setelah kol_profile_card, hanya meng-UPDATE kolomnya sendiri. Di sini
@@ -175,7 +178,7 @@ def _semua_asset():
     ]
 
 
-def jalankan_transform_chain(logger=None):
+def jalankan_transform_chain(logger=None, postgres=None):
     """Materialize 15 asset L0 Harmonization -> L2 Gold. Tidak memanggil actor.
 
     Memakai definisi asset yang sama persis dengan yang dipakai UI Dagster, jadi
@@ -184,6 +187,10 @@ def jalankan_transform_chain(logger=None):
 
     Seluruh asset memakai `ON CONFLICT ... DO UPDATE` dengan kunci unik yang
     jelas, sehingga menjalankan ini berkali-kali tidak menghasilkan duplikat.
+
+    `postgres` opsional: resource pengganti dengan kontrak yang sama, dipakai
+    `one_pass.py` untuk menyisipkan penjaga DELETE/rehearsal. Default-nya
+    `PostgresResource` biasa, jadi pemanggil lama tidak berubah perilaku.
 
     Mengembalikan `(sukses, daftar_ringkasan_per_asset)`.
     """
@@ -194,12 +201,13 @@ def jalankan_transform_chain(logger=None):
     from kol_orchestration.repository import _build_connection_string
     from kol_orchestration.resources import PostgresResource
 
+    if postgres is None:
+        postgres = PostgresResource(connection_string=_build_connection_string())
+
     hasil = materialize(
         assets=_semua_asset(),
         selection=[AssetKey(n) for n in TRANSFORM_ASSETS],
-        resources={"postgres": PostgresResource(
-            connection_string=_build_connection_string()
-        )},
+        resources={"postgres": postgres},
         raise_on_error=False,
     )
 

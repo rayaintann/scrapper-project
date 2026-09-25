@@ -651,7 +651,11 @@ def _normalisasi(teks: str | None) -> str:
         return ""
     t = unicodedata.normalize("NFKD", teks)
     t = "".join(c for c in t if not unicodedata.combining(c))
-    t = t.encode("ascii", "ignore").decode("ascii").lower()
+    # Sisa non-ASCII (emoji, simbol, aksara non-Latin) jadi PEMISAH, tidak
+    # dibuang: `"BDG📍Cosplay"` harus menjadi "bdg cosplay", bukan "bdgcosplay"
+    # yang membuat kata di kedua sisinya tidak lagi cocok sebagai kata utuh.
+    # Huruf bergaya (𝓙𝓪𝓴𝓪𝓻𝓽𝓪) sudah dilipat ke ASCII oleh NFKD di atas.
+    t = "".join(c if c.isascii() else " " for c in t).lower()
     t = _RE_BUKAN_HURUF.sub(" ", t)
     return _RE_SPASI.sub(" ", t).strip()
 

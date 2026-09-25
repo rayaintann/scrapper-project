@@ -263,8 +263,8 @@ def test_db_kontributor_terisi_saat_ada_skor(conn):
             assert r.what_matters_contributing >= 1
 
 
-def _akun_post_metric(conn):
-    """Semua baris post_metric, dikelompokkan per akun, plus id KOL-nya.
+def _akun_post_metric(conn, hanya_active: bool = True):
+    """Semua baris post_metric KOL active (populasi Discovery), per akun, plus id KOL-nya.
 
     Dikunci dengan `kol_directory.id`, BUKAN username: handle yang sama bisa
     punya akun Instagram DAN TikTok (3 kasus di data sekarang), dan mengunci
@@ -278,7 +278,8 @@ def _akun_post_metric(conn):
               FROM l2_gold.post_metric pm
               JOIN public.kol_social_account ksa
                 ON ksa.social_account_id = pm.social_account_id
-              JOIN public.kol_directory kd ON kd.id = ksa.kol_id""")
+              JOIN public.kol_directory kd ON kd.id = ksa.kol_id
+            """ + ("WHERE kd.directory_status = 'active'" if hanya_active else ""))
         akun: dict[str, list] = {}
         nama: dict[str, str] = {}
         for u, sid, hid, kol, eng, foll, er, views in cur.fetchall():
@@ -292,8 +293,9 @@ def _akun_post_metric(conn):
 
 @pytest.mark.needs_db
 def test_db_cte_post_quality_paritas_dengan_python(conn):
-    """Angka mentah CTE SQL = `ringkas_post_content_quality` Python, per akun."""
-    akun, _ = _akun_post_metric(conn)
+    """Angka mentah CTE SQL = `ringkas_post_content_quality` Python, per akun.
+    CTE-nya per akun atas seluruh post_metric (bukan populasi Discovery)."""
+    akun, _ = _akun_post_metric(conn, hanya_active=False)
     with conn.cursor() as cur:
         cur.execute("WITH " + w.SQL_CONTENT_QUALITY_CTE.strip()
                     + " SELECT social_account_id::text, er_pct, median_views,"
@@ -345,7 +347,15 @@ def test_db_content_quality_akun_tanpa_post_tetap_null(conn):
     punya_post = set(nama.values())
     hasil = db.search_kol_directory(conn, matters="content_quality", limit=200)
     tanpa_post = [r for r in hasil if r.id not in punya_post]
-    assert tanpa_post
+    # Populasi Discovery = KOL active; jumlah yang tanpa post dihitung dari DB,
+    # bukan diasumsikan ada. Semuanya harus tetap muncul di hasil.
+    with conn.cursor() as cur:
+        cur.execute("""SELECT count(*) FROM public.kol_directory kd
+                        WHERE kd.directory_status = 'active'
+                          AND NOT EXISTS (SELECT 1 FROM public.kol_social_account ksa
+                                            JOIN l2_gold.post_metric pm ON pm.social_account_id = ksa.social_account_id
+                                           WHERE ksa.kol_id = kd.id)""")
+        assert len(tanpa_post) == cur.fetchone()[0]
     for r in tanpa_post:
         assert r.what_matters_score is None
         assert r.what_matters_contributing == 0
@@ -362,7 +372,8 @@ def test_db_kunci_asing_kembali_ke_relevansi(conn):
 def _feature_er(conn):
     """kol_directory.id -> (platform, Feature ER platform itu), dengan join
     yang sama seperti jalur baca, plus populasi ER per platform. Populasinya
-    seluruh direktori -- pencarian tanpa filter."""
+    KOL `directory_status = 'active'` -- populasi yang dilayani Discovery
+    (sama dengan Autometric whatMatters/records.ts)."""
     with conn.cursor() as cur:
         cur.execute("WITH " + w.SQL_FEATURE_ER_CTE.strip() + """
             SELECT k.id::text, p.key, fe.engagement_rate, k.engagement_rate
@@ -371,7 +382,8 @@ def _feature_er(conn):
               LEFT JOIN public.kol_social_account ksa ON ksa.kol_id = k.id
               LEFT JOIN feature_er fe
                      ON fe.social_account_id = ksa.social_account_id
-                    AND fe.platform = p.key""")
+                    AND fe.platform = p.key
+             WHERE k.directory_status = 'active'""")
         baris = cur.fetchall()
     peta = {i: (plat, None if er is None else float(er), roster)
             for i, plat, er, roster in baris}

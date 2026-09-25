@@ -320,7 +320,9 @@ def _jalankan(args, cfg) -> int:
         # --- daftar akun yang akan diproses ---------------------------------
         if args.usernames:
             wanted = {normalize_username(u) for u in args.usernames if normalize_username(u)}
-            rows = [r for r in fetch_usernames(conn, platform, limit=100000, order=args.order)
+            # Daftar eksplisit: KOL inactive boleh dicari lagi (scrape sukses -> active).
+            rows = [r for r in fetch_usernames(conn, platform, limit=100000, order=args.order,
+                                               include_inactive=True)
                     if r.normalized in wanted]
         else:
             rows = fetch_usernames(conn, platform, limit=args.limit, order=args.order)
@@ -333,7 +335,8 @@ def _jalankan(args, cfg) -> int:
             # hanya muncul sebagai item error tetap ikut diproses.
             in_file = {u for u in (scraper.item_username(i) for i in items_all) if u}
             if not args.usernames:
-                extra = [r for r in fetch_usernames(conn, platform, limit=100000, order=args.order)
+                extra = [r for r in fetch_usernames(conn, platform, limit=100000, order=args.order,
+                                                    include_inactive=True)
                          if r.normalized in in_file]
                 requested = dedupe_rows(extra)
         else:

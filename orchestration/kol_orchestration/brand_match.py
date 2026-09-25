@@ -133,7 +133,7 @@ def _sidik_profil(postgres: PostgresResource) -> str:
     name=PROFILE_SENSOR,
     job=brand_match_job,
     minimum_interval_seconds=30,
-    default_status=DefaultSensorStatus.STOPPED,
+    default_status=DefaultSensorStatus.RUNNING,   # freshness Brand Match: aktif sejak instance baru
     description="Brand Profile berubah (count/max(updated_at)) -> brand_match_job.",
 )
 def brand_profile_changed_sensor(context: SensorEvaluationContext,
@@ -162,7 +162,7 @@ def brand_profile_changed_sensor(context: SensorEvaluationContext,
     monitored_jobs=[transform_chain_job],
     request_job=brand_match_job,
     minimum_interval_seconds=30,
-    default_status=DefaultSensorStatus.STOPPED,
+    default_status=DefaultSensorStatus.RUNNING,   # freshness Brand Match: aktif sejak instance baru
     description="transform_chain_job sukses (L2 selesai) -> brand_match_job.",
 )
 def brand_match_after_transform(context):

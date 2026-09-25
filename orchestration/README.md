@@ -41,6 +41,7 @@ schema tapi **belum punya asset** — lihat catatan di bawah graf dependency.
 | `kol_orchestration/repository.py` | `Definitions` — daftar asset, job, sensor, resource (`schedules` sengaja kosong) |
 | `kol_orchestration/one_shot.py` | `one_shot_scrape_job` (berbiaya) dan `transform_chain_job` (gratis) |
 | `kol_orchestration/sensors.py` | `l0_raw_new_data_sensor` — auto-trigger `transform_chain_job` saat ada data baru di `l0_raw` |
+| `kol_orchestration/one_pass.py`, `one_pass_guard.py` | ONE-PASS ENRICHMENT: satu command nol biaya (evidence → enrichment → L0→L2 → integrity → report) + penjaga runtime |
 | `service/` | Scheduled Task Windows supaya daemon Dagster hidup sendiri (persistent, tahan restart) |
 | `kol_orchestration/assets/harmonization.py` | 4 asset `l0_harmonization` — memanggil `sp_sync_*()` |
 | `kol_orchestration/assets/silver.py` | 2 asset `l1_silver` — memanggil `sp_build_unified_*()` |
@@ -225,6 +226,25 @@ Tes offline (tanpa Apify, tanpa Postgres):
 ```powershell
 .env\Scripts\python.exe -m unittest tests.test_l0_raw_sensor
 ```
+
+---
+
+## One-pass enrichment (nol biaya)
+
+Satu entry point yang memakai evidence yang SUDAH ADA untuk cohort 100 KOL
+(`kol_orchestration/data/one_pass_cohort.csv`, 70 IG / 30 TikTok), lalu memanggil
+classifier, writer, dan rantai asset existing — tidak ada yang ditulis ulang.
+
+```powershell
+venv\Scripts\python.exe -m orchestration.one_pass_enrichment --report-only  # coverage + alasan Unknown, tanpa write
+venv\Scripts\python.exe -m orchestration.one_pass_enrichment --dry-run      # rehearsal penuh lalu ROLLBACK (~20 menit)
+venv\Scripts\python.exe -m orchestration.one_pass_enrichment                # pipeline penuh
+```
+
+Penjaga runtime (`one_pass_guard.py`, tidak bisa dimatikan dari CLI): jaringan keluar,
+subprocess, Apify, dan `scheduler_engine.run_once` diblokir; transaksi yang menghapus baris
+di-ROLLBACK; DDL/TRUNCATE ditolak; ambang dan taxonomy dibandingkan dengan
+`one_pass_baseline.json`. Laporan ada di `output/one_pass/<waktu>-<mode>/`.
 
 ---
 

@@ -12,7 +12,7 @@ from typing import Sequence
 
 import psycopg2.extras
 
-from db import fetch_social_account_ids
+from db import fetch_social_account_ids, reactivate_kols
 from raw_store import fk_targets
 from tiktok_transform import extract_username, to_raw_row
 
@@ -31,6 +31,8 @@ class RawInsertStats:
     skipped_failed: int = 0
     skipped_no_username: int = 0
     link_blocked_reason: str | None = None
+    # KOL inactive yang profilnya berhasil ditarik lagi -> active (lifecycle master)
+    reactivated: int = 0
 
 
 def social_account_link_blocked(conn) -> str | None:
@@ -133,8 +135,11 @@ def insert_profiles(
         )
 
     payload = []
+    found_ids: list[str] = []
     for username, row in rows_by_username.items():
         social_account_id = account_ids.get(username)
+        if social_account_id:
+            found_ids.append(social_account_id)
         if social_account_id:
             stats.linked += 1
         else:
@@ -180,6 +185,8 @@ def insert_profiles(
             cur, query, payload, template=template, page_size=100, fetch=True
         )
         stats.inserted = len(returned)
+        # Ditemukan kembali oleh scraper: aktifkan lagi KOL-nya, di transaksi yang sama.
+        stats.reactivated = reactivate_kols(conn, found_ids)
 
     if commit:
         conn.commit()

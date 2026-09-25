@@ -66,8 +66,18 @@ SQL_ROSTER = """
     HAVING count(DISTINCT btrim(influencer_gender)) = 1
 """
 
+#: Rule 2a: influencer_name roster, hanya bila satu akun punya tepat satu nama.
+SQL_ROSTER_NAMA = """
+    SELECT social_account_id, min(btrim(raw_row->>'influencer_name'))
+      FROM l0_raw.kol_roster_import
+     WHERE social_account_id IS NOT NULL
+       AND btrim(coalesce(raw_row->>'influencer_name', '')) <> ''
+     GROUP BY social_account_id
+    HAVING count(DISTINCT btrim(raw_row->>'influencer_name')) = 1
+"""
+
 SQL_BACA = """
-    SELECT social_account_id, username, display_name
+    SELECT social_account_id, username, display_name, bio
       FROM l2_gold.kol_profile_card
      WHERE creator_gender_source IS DISTINCT FROM %(manual)s
 """
@@ -96,6 +106,8 @@ def _jalankan(postgres: PostgresResource) -> Output:
         with conn.cursor() as cur:
             cur.execute(SQL_ROSTER)
             roster = {sid: kode for sid, kode in cur.fetchall()}
+            cur.execute(SQL_ROSTER_NAMA)
+            nama_roster = {sid: nama for sid, nama in cur.fetchall()}
 
             cur.execute(SQL_BACA, {"manual": SUMBER_MANUAL})
             baris = cur.fetchall()
@@ -103,8 +115,11 @@ def _jalankan(postgres: PostgresResource) -> Output:
             ditulis = 0
             per_hasil: Counter = Counter()
             per_alasan_unknown: Counter = Counter()
-            for sid, username, display_name in baris:
-                hasil = pilih_gender(roster.get(sid), display_name, username)
+            for sid, username, display_name, bio in baris:
+                # bio TIDAK dioper: sumber `bio_self_declared` belum diizinkan
+                # ck_kpc_creator_gender_source (lihat creator_gender_inference.SUMBER_BIO).
+                hasil = pilih_gender(roster.get(sid), display_name, username,
+                                     nama_roster=nama_roster.get(sid))
                 per_hasil[(hasil.source or "unknown", hasil.nilai or "unknown")] += 1
                 if not hasil.diketahui:
                     per_alasan_unknown[hasil.alasan or "tanpa nama"] += 1

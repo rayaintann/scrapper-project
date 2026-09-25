@@ -311,6 +311,43 @@ def connect(pg: PostgresConfig, connect_timeout: int = 15) -> Iterator[psycopg2.
         conn.close()
 
 
+#: Lifecycle KOL di master: `kol_directory.directory_status`. 'active' = serving
+#: (Discovery, scrape terjadwal); 'inactive' = non-serving, SEMUA historinya tetap
+#: ada. Hanya dua nilai ini yang ditulis kode ini.
+DIRECTORY_ACTIVE = "active"
+DIRECTORY_INACTIVE = "inactive"
+SQL_KOL_ACTIVE = "k.directory_status = 'active'"
+
+SQL_REACTIVATE = """
+    UPDATE public.kol_directory kd
+       SET directory_status = 'active', updated_at = now()
+      FROM public.kol_social_account ksa
+     WHERE ksa.kol_id = kd.id
+       AND ksa.social_account_id = ANY(%s::uuid[])
+       AND kd.directory_status IS DISTINCT FROM 'active'
+    RETURNING kd.id
+"""
+
+
+def reactivate_kols(conn, social_account_ids: Iterable[str]) -> int:
+    """KOL yang profilnya BERHASIL di-scrape lagi -> `directory_status='active'`.
+
+    Dipanggil penulis profil raw (IG + TikTok) di transaksi yang sama dengan
+    INSERT-nya, hanya untuk item sukses yang tertaut lewat `kol_social_account`
+    (jembatan resmi, bukan cocok username). Tidak membuat baris baru, tidak
+    menghapus apa pun; KOL yang sudah active tidak disentuh (idempoten).
+    Tidak commit -- pemanggil yang commit."""
+    ids = sorted({str(s) for s in social_account_ids if s})
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(SQL_REACTIVATE, (ids,))
+        n = len(cur.fetchall())
+    if n:
+        logger.info("Reaktivasi %d KOL (directory_status -> active)", n)
+    return n
+
+
 def fetch_instagram_usernames(
     conn,
     limit: int = 1000,
@@ -329,12 +366,19 @@ def fetch_usernames(
     limit: int = 1000,
     order: str = "followers",
     only_unscraped: bool = False,
+    include_inactive: bool = False,
 ) -> list[DirectoryRow]:
     """Ambil maksimal `limit` username satu platform dari public.kol_directory.
 
     Platform difilter lewat join ke public.platforms (key = 'instagram' atau
     'tiktok'), bukan dengan UUID hardcode, supaya tetap benar kalau data platform
     diseed ulang di environment lain.
+
+    Default hanya KOL `directory_status = 'active'`: pemilihan massal tidak boleh
+    men-scrape KOL non-serving -- scrape yang berhasil mengaktifkannya kembali
+    (`reactivate_kols`), jadi scrape massal atas KOL inactive akan membatalkan
+    lifecycle-nya. `include_inactive=True` hanya untuk daftar username EKSPLISIT
+    (KOL yang memang sengaja dicari lagi).
     """
     if order not in ORDER_CLAUSES:
         raise ValueError(
@@ -346,6 +390,7 @@ def fetch_usernames(
         if only_unscraped
         else ""
     )
+    active_filter = "" if include_inactive else f"AND {SQL_KOL_ACTIVE}"
     query = f"""
         SELECT k.id, k.username
         FROM public.kol_directory k
@@ -354,6 +399,7 @@ def fetch_usernames(
           AND k.username IS NOT NULL
           AND btrim(k.username) <> ''
           {unscraped_filter}
+          {active_filter}
         ORDER BY {ORDER_CLAUSES[order]}
         LIMIT %s
     """
@@ -630,7 +676,8 @@ _SEARCH_BODY_TEMPLATE = """
       LEFT JOIN public.kol_social_account ksa ON ksa.kol_id = k.id
       LEFT JOIN l2_gold.kol_profile_card pc   ON pc.social_account_id = ksa.social_account_id
       LEFT JOIN growth g                      ON g.social_account_id = ksa.social_account_id{join_tambahan}
-     WHERE (%(q_contains)s::text IS NULL
+     WHERE k.directory_status = 'active'
+       AND (%(q_contains)s::text IS NULL
             OR k.username      ILIKE %(q_contains)s
             OR pc.display_name ILIKE %(q_contains)s
             OR k.bio           ILIKE %(q_contains)s)
@@ -1153,6 +1200,9 @@ def update_profiles(conn, updates: Iterable[dict], commit: bool = True) -> int:
             bio                  = COALESCE(v.bio, k.bio),
             verified_status      = COALESCE(v.verified_status, k.verified_status),
             scrape_status        = v.scrape_status,
+            -- Profil yang berhasil ditarik lagi = KOL ditemukan kembali -> serving.
+            directory_status     = CASE WHEN v.scrape_status = 'success'
+                                        THEN 'active' ELSE k.directory_status END,
             last_refreshed_at    = now(),
             updated_at           = now()
         FROM (VALUES %s) AS v (

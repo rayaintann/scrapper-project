@@ -29,11 +29,26 @@ def test_gender_dari_female_male_pct_existing():
     assert {e.label for e in g.evidence} == {"female_pct", "male_pct", "gender_known_pct"}
 
 
-def test_gender_seimbang_unknown_tapi_pct_tetap_di_evidence():
+def test_gender_seimbang_adalah_nilai_balanced_bukan_unknown():
     g = A.classify_gender(inp(female_pct=45.0, male_pct=55.0, gender_known_pct=20.0,
                               gender_counts={"female": 9, "male": 11}))
-    assert not g.known and "seimbang" in g.reason
+    assert g.known and g.value == A.BALANCED and "seimbang" in g.reason
     assert any(e.label == "female_pct" and e.detail == "45" for e in g.evidence)
+
+
+def test_gender_50_50_balanced():
+    g = A.classify_gender(inp(female_pct=50.0, male_pct=50.0, gender_counts={"female": 5, "male": 5}))
+    assert g.value == A.BALANCED
+
+
+def test_gender_ambang_tetap_60_dan_5():
+    assert A.GENDER_SHARE_MIN == 60.0 and A.MIN_KNOWN == 5
+    # tepat 60% = mayoritas, bukan balanced
+    g = A.classify_gender(inp(female_pct=60.0, male_pct=40.0, gender_counts={"female": 6, "male": 4}))
+    assert g.value == "female"
+    # seimbang tapi < MIN_KNOWN diketahui: tetap Unknown (tidak ada bukti cukup)
+    g = A.classify_gender(inp(female_pct=50.0, male_pct=50.0, gender_counts={"female": 2, "male": 2}))
+    assert not g.known and "< 5" in g.reason
 
 
 def test_gender_tanpa_pct_unknown():
@@ -102,3 +117,19 @@ def test_modul_tidak_menulis_ke_db():
     src = inspect.getsource(A)
     for w in ("INSERT", "UPDATE ", "DELETE", "ALTER"):
         assert w not in src.upper().replace("UPDATED_AT", ""), w
+
+
+# --- migration 054: label kurasi hanya fallback --------------------------------------
+def test_label_kurasi_mengisi_unknown_saja():
+    inp = A.AudienceInput(has_data=True, country={"ID": (9, "inferred_high")},
+                          curated={"country": ("MY", "low"), "age": ("18-24", "low"), "city": ("Jakarta", "medium")})
+    r = A.classify(inp)
+    assert r["country"].value == "ID" and r["country"].source != A.SRC_CURATED       # measured/inferred menang
+    assert (r["age"].value, r["age"].source, r["age"].confidence) == ("18-24", A.SRC_CURATED, "low")
+    assert (r["city"].value, r["city"].confidence) == ("Jakarta", "medium")
+    assert A.validate(r) == []
+
+
+def test_akun_tanpa_feature_dengan_label_kurasi():
+    r = A.classify(A.AudienceInput(has_data=False, curated={"gender": ("female", "low")}))
+    assert r["gender"].value == "female" and not r["age"].known

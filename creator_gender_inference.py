@@ -62,6 +62,15 @@ import audience_inference as _A
 SUMBER_MANUAL = "manual"            # diisi manusia; TIDAK PERNAH ditimpa
 SUMBER_ROSTER = "roster"            # l0_raw.kol_roster_import.influencer_gender
 SUMBER_NAMA = "name_inference"      # modul ini
+#: influencer_name roster diproses aturan nama yang SAMA, jadi nilainya tetap
+#: `name_inference` -- satu-satunya nilai yang diizinkan constraint
+#: `ck_kpc_creator_gender_source` (manual/roster/name_inference). Asal nama
+#: ("influencer_name roster") tercatat di `alasan`.
+SUMBER_NAMA_ROSTER = SUMBER_NAMA
+#: Rule 2b (bio). TIDAK dipakai jalur produksi: `bio_self_declared` belum diizinkan
+#: constraint `ck_kpc_creator_gender_source`, dan melabelinya `name_inference` tidak jujur.
+#: Aktif hanya bila pemanggil mengoper `bio` (belum ada) -- butuh approval perubahan constraint.
+SUMBER_BIO = "bio_self_declared"
 
 #: Kode roster -> gender. Bukti data (cocok dengan digit jenis kelamin NIK
 #: 15/15 untuk 0 dan 49/51 untuk 1), BUKAN kontrak resmi pemilik data.
@@ -188,12 +197,66 @@ def gender_roster(kode: str | None) -> str | None:
 CONFIDENCE_ROSTER = "medium"
 
 
-def pilih_gender(roster: str | None, display_name: str | None,
-                 username: str | None) -> HasilGender:
+#: Peran keluarga/pasangan yang DITULIS kreator tentang dirinya di bio (Rule 2b).
+#: Divalidasi atas 685 KOL ber-influencer_gender roster (24 Sep 2026): pola Female
+#: 6/6 benar, pola peran Male 1/1. Kata ganti (`she/her`, `he/him`) SENGAJA tidak
+#: dipakai: `he/him` salah 1/1 di data yang sama. "my wife"/"istriku" menunjuk
+#: pasangan, jadi arahnya berlawanan.
+_BIO_FEMALE = tuple(re.compile(p) for p in (
+    r"\bibu dari\b", r"\bibu \d+ anak\b", r"\bmama dari\b", r"\bmama \d+ anak\b", r"\bbunda dari\b",
+    r"\bmom of\b", r"\bmommy of\b", r"\bmother of\b", r"\bproud mom\b", r"\bistri dari\b",
+    r"\bwife of\b", r"\bmy husband\b", r"\bsuamiku\b", r"\bsuami saya\b"))
+_BIO_MALE = tuple(re.compile(p) for p in (
+    r"\bayah dari\b", r"\bbapak \d+ anak\b", r"\bpapa dari\b", r"\bpapa \d+ anak\b",
+    r"\bdad of\b", r"\bdaddy of\b", r"\bfather of\b", r"\bproud dad\b", r"\bsuami dari\b",
+    r"\bhusband of\b", r"\bmy wife\b", r"\bistriku\b", r"\bistri saya\b"))
+
+
+def gender_dari_bio(bio: str | None) -> HasilGender:
+    """Rule 2b: female/male hanya dari peran keluarga/pasangan yang eksplisit di bio."""
+    t = (bio or "").lower()
+    f = [p.pattern for p in _BIO_FEMALE if p.search(t)]
+    m = [p.pattern for p in _BIO_MALE if p.search(t)]
+    if f and m:
+        return HasilGender(alasan="bio: penanda bertentangan")
+    if not (f or m):
+        return HasilGender(alasan="bio: tidak ada penanda")
+    nilai, pola = ("female", f) if f else ("male", m)
+    return HasilGender(nilai=nilai, source=SUMBER_BIO, confidence="medium",
+                       alasan="bio: " + pola[0].replace("\\b", "").replace("\\d+", "N"))
+
+
+def pilih_gender(roster: str | None, display_name: str | None, username: str | None,
+                 nama_roster: str | None = None, bio: str | None = None) -> HasilGender:
     """Urutan prioritas (baris `manual` sudah disaring pemanggil):
-    roster > name_inference > unknown. Inference tidak pernah menimpa roster."""
+
+        roster influencer_gender > nama akun (display name / username)
+          > influencer_name roster (aturan yang sama)            [Rule 2a]
+          > peran keluarga/pasangan eksplisit di bio              [Rule 2b]
+          > unknown
+
+    Inference tidak pernah menimpa roster. Rule 2a/2b hanya dipakai bila nama akun
+    tidak memberi jawaban dan akun bukan akun bisnis/grup; bila keduanya
+    bertentangan -> unknown. Divalidasi atas 685 KOL ber-gender roster:
+    influencer_name Female 108/110, Male 21/21."""
     g = gender_roster(roster)
     if g is not None:
         return HasilGender(nilai=g, source=SUMBER_ROSTER, confidence=CONFIDENCE_ROSTER,
                            alasan=f"roster influencer_gender={roster.strip()}")
-    return tebak_gender_kreator(display_name, username)
+    h = tebak_gender_kreator(display_name, username)
+    if h.diketahui or h.alasan in ("akun bisnis", "akun grup/pasangan"):
+        return h
+    kandidat = []
+    if nama_roster and nama_roster.strip():
+        n = tebak_gender_kreator(nama_roster, None)
+        if n.diketahui:
+            kandidat.append(HasilGender(n.nilai, SUMBER_NAMA_ROSTER, n.confidence,
+                                        f"influencer_name roster: {n.alasan}"))
+    b = gender_dari_bio(bio)
+    if b.diketahui:
+        kandidat.append(b)
+    if not kandidat:
+        return h
+    if len({k.nilai for k in kandidat}) > 1:
+        return HasilGender(alasan="influencer_name roster dan bio bertentangan")
+    return kandidat[0]

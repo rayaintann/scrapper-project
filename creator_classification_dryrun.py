@@ -75,8 +75,26 @@ SQL_POSTS = """
 SQL_ROSTER = """
     SELECT kol_directory_id::text,
            (array_agg(btrim(influencer_gender)) FILTER (WHERE btrim(influencer_gender) IN ('0','1')))[1],
-           (array_agg(influencer_no_ktp) FILTER (WHERE btrim(coalesce(influencer_no_ktp,'')) <> ''))[1]
+           (array_agg(influencer_no_ktp) FILTER (WHERE btrim(coalesce(influencer_no_ktp,'')) <> ''))[1],
+           CASE WHEN count(DISTINCT btrim(raw_row->>'influencer_name'))
+                     FILTER (WHERE btrim(coalesce(raw_row->>'influencer_name','')) <> '') = 1
+                THEN min(btrim(raw_row->>'influencer_name'))
+                     FILTER (WHERE btrim(coalesce(raw_row->>'influencer_name','')) <> '') END
       FROM l0_raw.kol_roster_import WHERE kol_directory_id IS NOT NULL GROUP BY 1"""
+#: Rule 3b: `categories_list` dari baris roster LAIN milik orang yang sama
+#: (influencer_id sama, baris itu tidak tertaut ke kol_directory ini).
+SQL_ROSTER_SIBLING = """
+    SELECT own.kol_directory_id::text,
+           array_agg(DISTINCT btrim(x) ORDER BY btrim(x))
+      FROM l0_raw.kol_roster_import own
+      JOIN l0_raw.kol_roster_import sib
+        ON sib.influencer_id = own.influencer_id
+       AND sib.id <> own.id
+       AND sib.kol_directory_id IS DISTINCT FROM own.kol_directory_id
+     CROSS JOIN LATERAL unnest(string_to_array(sib.raw_row->>'categories_list', ',')) x
+     WHERE own.kol_directory_id IS NOT NULL AND own.influencer_id IS NOT NULL
+       AND btrim(x) <> ''
+     GROUP BY 1"""
 SQL_CARD = """
     SELECT DISTINCT ON (social_account_id) social_account_id::text, creator_gender,
            creator_gender_source, creator_age, creator_age_source
@@ -87,6 +105,33 @@ SQL_PROTO = """
            (raw_payload::jsonb ->> 'isBusinessAccount')::boolean,
            raw_payload::jsonb -> 'latestPosts'
       FROM l0_raw.ig_profile_apify ORDER BY social_account_id, scraped_at DESC NULLS LAST"""
+#: `latestPosts` dari SEMUA snapshot profil, terbaru dulu. SQL_PROTO hanya
+#: memegang snapshot terakhir; tiap snapshot memuat ~12 post terbaru SAAT ITU,
+#: jadi post dari snapshot lebih lama yang belum ada di L1 hilang kalau hanya
+#: snapshot terakhir yang dibaca (cohort 100: 256 post vs 172).
+SQL_PROTO_POSTS = """
+    SELECT social_account_id::text, raw_payload::jsonb -> 'latestPosts'
+      FROM l0_raw.ig_profile_apify ORDER BY social_account_id, scraped_at DESC NULLS LAST"""
+
+
+def merge_latest_posts(snapshots) -> list[dict]:
+    """Gabungkan `latestPosts` beberapa snapshot (terbaru dulu), satu per `id`.
+
+    Versi dari snapshot terbaru yang dipakai kalau id yang sama muncul lagi.
+    Post tanpa id tidak bisa dideduplikasi, jadi hanya diambil dari snapshot
+    terbaru -- sama persis dengan perilaku sebelumnya untuk snapshot itu."""
+    out, seen = [], set()
+    for i, posts in enumerate(snapshots):
+        for p in posts or []:
+            pid = p.get("id") if isinstance(p, dict) else None
+            if pid is None:
+                if i == 0:
+                    out.append(p)
+                continue
+            if str(pid) not in seen:
+                seen.add(str(pid))
+                out.append(p)
+    return out
 
 
 def load(conn):
@@ -101,15 +146,25 @@ def load(conn):
             posts[sa].append((str(cid), C.Post(cap, tuple(tags or ()), mt,
                                                float(dur) if dur is not None else None)))
         cur.execute(SQL_ROSTER); roster = {r[0]: r[1:] for r in cur.fetchall()}
+        cur.execute(SQL_ROSTER_SIBLING)
+        for kid, sib_cats in cur.fetchall():
+            g, nik, nm = (tuple(roster.get(kid, ())) + (None, None, None))[:3]
+            roster[kid] = (g, nik, nm, tuple(sib_cats or ()))
         cur.execute(SQL_CARD); card = {r[0]: r[1:] for r in cur.fetchall()}
         cur.execute(SQL_PROTO); proto = {r[0]: r[1:] for r in cur.fetchall()}
+        cur.execute(SQL_PROTO_POSTS)
+        history = defaultdict(list)
+        for sa, lp in cur.fetchall():
+            history[sa].append(lp)
+        proto = {sa: (decl, biz, merge_latest_posts(history.get(sa, [latest])))
+                 for sa, (decl, biz, latest) in proto.items()}
     return C.Taxonomy.from_rows(cats, attrs), kols, prof, posts, roster, card, proto
 
 
 def build_input(kol, prof, posts, roster, card, proto, prototype: bool) -> tuple[C.CreatorInput, dict]:
     kid, username, platform, sa, cat_names = kol
     p_user, display_name, bio = prof.get(sa, (None, None, None))
-    r_gender, nik = roster.get(kid, (None, None))
+    r_gender, nik, r_name, sibling_cats = (tuple(roster.get(kid, ())) + (None, None, None, ()))[:4]
     c = card.get(sa, (None, None, None, None))
     manual_gender = c[0] if c[1] == "manual" else None
     manual_age = c[2] if c[3] == "manual" else None
@@ -127,7 +182,8 @@ def build_input(kol, prof, posts, roster, card, proto, prototype: bool) -> tuple
             items.append(C.Post(lp.get("caption"), tuple(lp.get("hashtags") or ()),
                                 lp.get("type"), lp.get("videoDuration"), PROTO_POST_SOURCE))
     inp = C.CreatorInput(kid, platform, username or p_user, display_name, bio, declared, is_business,
-                         tuple(cat_names or ()), r_gender, nik, manual_gender, manual_age, tuple(items))
+                         tuple(cat_names or ()), r_gender, nik, manual_gender, manual_age, tuple(items),
+                         sibling_roster_categories=tuple(sibling_cats or ()), roster_name=r_name)
     return inp, {"card_gender": c[0], "card_gender_source": c[1], "card_age": c[2], "card_age_source": c[3]}
 
 

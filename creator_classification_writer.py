@@ -58,6 +58,8 @@ import creator_classification_dryrun as D
 from config import load_config
 
 CREATOR_SOURCE = "creator_classification"
+#: Baris kurasi (kol_attribute_map default 045, kol_directory.inferred_* sejak 054): tidak pernah ditimpa.
+CURATED_SOURCE = "curated"
 EXPECT_ACTIVE = 1980
 MAP_KINDS = ("style", "personality")
 CARD_CREATOR = ("gender", "age")
@@ -183,7 +185,10 @@ def plan(tax: C.Taxonomy, results, state: State, attr_ids: dict, mode: str) -> P
         # Creator category/subcategory -> kol_directory.inferred_*
         want = desired_kd(tax, res, mode)
         have = state.kd.get(kid, {})
-        if _differs(want, have):
+        if have.get("inferred_category_source") == CURATED_SOURCE:
+            # Kurasi (migration 054): tidak pernah ditimpa/dibersihkan classifier.
+            p.skipped_curated["creator_category"] += 1
+        elif _differs(want, have):
             p.kd_updates.append((kid, want))
             if want["inferred_category_id"] is None:
                 p.cleared["creator_category"] += 1
@@ -242,11 +247,16 @@ def read_state(cur) -> State:
     return State(kd, mp)
 
 
-def load_inputs(conn, prototype: bool, tahun: int):
-    """Classifier creator + audience untuk semua KOL aktif (read-only)."""
-    data = D.load(conn)
+def load_inputs(conn, prototype: bool, tahun: int, data=None, audience_in=None):
+    """Classifier creator + audience untuk semua KOL aktif (read-only).
+
+    `data` (hasil `D.load`) dan `audience_in` (hasil `A.load`) boleh diberikan
+    dari luar supaya evidence yang sudah dibaca sekali tidak di-query ulang."""
+    if data is None:
+        data = D.load(conn)
     tax, rows, _viol = D.run(prototype, data, tahun)
-    audience_in = A.load(conn)
+    if audience_in is None:
+        audience_in = A.load(conn)
     with conn.cursor() as cur:
         cur.execute(SQL_ATTRIBUTE_IDS)
         attr_ids = {}
@@ -367,7 +377,7 @@ SQL_KD_UPDATE = f"""
     UPDATE public.kol_directory
        SET {', '.join(f'{c} = %({c})s' for c in KD_COLS)},
            inferred_category_at = CASE WHEN %(inferred_category_id)s::uuid IS NULL THEN NULL ELSE now() END
-     WHERE id = %(kid)s"""
+     WHERE id = %(kid)s AND inferred_category_source IS DISTINCT FROM '{CURATED_SOURCE}'"""
 
 
 def _jsonify(d: dict) -> dict:

@@ -1,0 +1,75 @@
+{
+ "_comment": "Baseline one-pass: ambang & taxonomy yang TIDAK boleh berubah oleh command. Perubahan sah = ubah kode + file ini lewat review.",
+ "generated": "2026-09-24",
+ "cohort": {
+  "total": 100,
+  "instagram": 70,
+  "tiktok": 30
+ },
+ "taxonomy": {
+  "kol_categories": [
+   76,
+   "70c342598ac6fbba2b7c9863f5f8bdf5"
+  ],
+  "kol_attribute": [
+   40,
+   "a9b6444b6682a04d66dd371eb6d68e2d"
+  ]
+ },
+ "thresholds": {
+  "audience_classification": {
+   "GENDER_SHARE_MIN": 60.0,
+   "MIN_KNOWN": 5
+  },
+  "creator_classification": {
+   "HIGH_SCORE": 4.0,
+   "MIN_MARGIN": 1.0,
+   "MIN_SCORE": 2.0,
+   "PERSONALITY_MIN_HITS": 3,
+   "PERSONALITY_MIN_POSTS": 5,
+   "PERSONALITY_MIN_RATIO": 0.4,
+   "STYLE_MIN_HITS": 2,
+   "STYLE_MIN_POSTS": 3,
+   "STYLE_MIN_RATIO": 0.3,
+   "W_BIO": 2.0,
+   "W_BIO_EXTRA_TERM": 0.5,
+   "W_BIO_MAX": 3.0,
+   "W_DECLARED": 3.0,
+   "W_HASHTAG": 0.5,
+   "W_HASHTAG_CAP": 1.0,
+   "W_NAME": 0.25,
+   "W_REPEATED_POSTS": 2.0,
+   "W_SINGLE_POST": 1.0
+  },
+  "metrics_thresholds": {
+   "AGE_MAX": 80,
+   "AGE_MIN": 13,
+   "FREQ_HIGH_HARI": 30,
+   "FREQ_HIGH_POST": 10,
+   "FREQ_MEDIUM_HARI": 14,
+   "FREQ_MEDIUM_POST": 5,
+   "GENDER_HIGH_MIN": 70.0,
+   "GENDER_MEDIUM_MIN": 40.0,
+   "GROWTH_HIGH_MIN": 10.0,
+   "GROWTH_LOW_MIN": 0.0,
+   "GROWTH_MEDIUM_MIN": 5.0,
+   "PRIORITY_HIGH_MIN": 5.0,
+   "PRIORITY_MEDIUM_MIN": 2.0,
+   "QUALITY_HIGH_MIN": 75.0,
+   "QUALITY_MEDIUM_MIN": 50.0,
+   "RISING_MIN": 5.0,
+   "STABILITY_HIGH_MAX": 1.0,
+   "STABILITY_MEDIUM_MAX": 3.0,
+   "STABILITY_MIN_PERIODE": 3,
+   "VIRAL_MULTIPLIER": 3.0
+  },
+  "creator_age_inference": {
+   "AGE_MAX": 80,
+   "AGE_MIN": 13,
+   "TOLERANSI_TAHUN": 1
+  },
+  "kol_orchestration.assets.feature_engagement": {
+   "VIRAL_MULTIPLIER": 3.0
+  }
+ }
+}

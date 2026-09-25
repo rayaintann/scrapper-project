@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 import psycopg2.extras
 
-from db import fetch_social_account_ids
+from db import fetch_social_account_ids, reactivate_kols
 from transform import extract_username, is_error_item
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,8 @@ class RawInsertStats:
     skipped_failed: int = 0
     skipped_no_username: int = 0
     link_blocked_reason: str | None = None
+    # KOL inactive yang profilnya berhasil ditarik lagi -> active (lifecycle master)
+    reactivated: int = 0
 
 
 def fk_targets(conn, table: str = RAW_TABLE, column: str = "social_account_id") -> set[str]:
@@ -162,8 +164,11 @@ def insert_profiles(
         )
 
     payload = []
+    found_ids: list[str] = []
     for username, item in usable:
         social_account_id = account_ids.get(username)
+        if social_account_id and not is_error_item(item):
+            found_ids.append(social_account_id)
         if social_account_id:
             stats.linked += 1
         else:
@@ -207,6 +212,8 @@ def insert_profiles(
             cur, query, payload, template=template, page_size=100, fetch=True
         )
         stats.inserted = len(returned)
+        # Ditemukan kembali oleh scraper: aktifkan lagi KOL-nya, di transaksi yang sama.
+        stats.reactivated = reactivate_kols(conn, found_ids)
 
     if commit:
         conn.commit()

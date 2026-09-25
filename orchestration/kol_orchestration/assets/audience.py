@@ -1164,4 +1164,122 @@ def audience_age_measured(postgres: PostgresResource) -> Output:
     return _tulis_age_terukur(postgres)
 
 
-audience_assets = [audience_feature, audience_gold, audience_age_measured]
+# ===========================================================================
+# GEO TERUKUR (jalur A): unified_audience country/city -> audience_geo_daily
+# ===========================================================================
+# Pasangan `audience_age_measured` untuk lokasi. Tanpa asset ini, country/city
+# Insights berhenti di L1 persis seperti umur dulu -- padahal pembaca
+# (`audience_classification.SQL_GEO`) sudah mendahulukan baris 'measured'.
+#
+# Normalisasi kunci, hanya dua aturan dan tidak menebak:
+#   country  kode ISO-2 platform, di-upper. Bukan dua huruf -> dilewati + dihitung.
+#   city     Insights menulis "Kota, Wilayah" ("Jakarta, Jakarta"); jalur B
+#            menulis nama kota saja ("Jakarta"). Bagian sebelum koma pertama
+#            dipakai supaya satu kota = satu kunci di kedua jalur. Dua baris yang
+#            jatuh ke kunci yang sama DIJUMLAHKAN, tidak saling menimpa.
+#
+# TIDAK ADA DELETE. Snapshot terukur per tanggal selalu lengkap, dan pembaca
+# hanya memakai tanggal terukur terakhir; baris inferred tidak disentuh kecuali
+# kuncinya persis sama pada tanggal yang sama (measured menang, arah yang sama
+# dengan jalur umur).
+_GEO_LEVELS = ("country", "city")
+
+
+def normalisasi_geo_platform(level: str, kunci: str | None) -> str | None:
+    if not kunci or not str(kunci).strip():
+        return None
+    k = str(kunci).strip()
+    if level == "country":
+        k = k.upper()
+        return k if len(k) == 2 and k.isalpha() else None
+    if level == "city":
+        k = k.split(",", 1)[0].strip()
+        return k or None
+    return None
+
+
+def agregasi_geo_terukur(mentah: list[tuple]) -> tuple[dict[tuple, float], Counter]:
+    """`(sid, platform, tanggal, audience_type, dimension_key, value)` -> jumlah per
+    (sid, platform, tanggal, level, kunci). Kunci tak dikenal dilewati dan dihitung."""
+    terkumpul: dict[tuple, float] = {}
+    tak_dikenal: Counter = Counter()
+    for sid, plat, tgl, level, kunci_mentah, nilai in mentah:
+        if level not in _GEO_LEVELS:
+            continue
+        kunci = normalisasi_geo_platform(level, kunci_mentah)
+        if kunci is None:
+            tak_dikenal[f"{level}:{kunci_mentah}"] += 1
+            continue
+        if nilai is None:
+            continue
+        k = (sid, plat, tgl, level, kunci)
+        terkumpul[k] = terkumpul.get(k, 0) + float(nilai)
+    return terkumpul, tak_dikenal
+
+
+SQL_GEO_TERUKUR = """
+    SELECT ua.social_account_id, pl.key, ua.date, ua.audience_type, ua.dimension_key, ua.value
+      FROM l1_silver.unified_audience ua
+      JOIN public.platforms pl ON pl.id = ua.platform_id
+     WHERE ua.audience_type IN ('country', 'city') AND ua.social_account_id IS NOT NULL"""
+
+SQL_UPSERT_GEO_TERUKUR = """
+    INSERT INTO l2_gold.audience_geo_daily (
+        social_account_id, platform, audience_date, geo_level, geo_key, audience_count,
+        confidence, created_at, updated_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now())
+    ON CONFLICT (social_account_id, platform, audience_date, geo_level, geo_key)
+    DO UPDATE SET audience_count = EXCLUDED.audience_count,
+                  confidence     = EXCLUDED.confidence,
+                  updated_at     = now()
+    WHERE audience_geo_daily.audience_count IS DISTINCT FROM EXCLUDED.audience_count
+       OR audience_geo_daily.confidence IS DISTINCT FROM EXCLUDED.confidence"""
+
+
+def _tulis_geo_terukur(postgres: PostgresResource) -> Output:
+    conn = postgres.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM l1_silver.unified_audience "
+                        "WHERE audience_type IN ('country', 'city')")
+            n_sumber = cur.fetchone()[0]
+            if n_sumber == 0:
+                conn.rollback()
+                return Output(0, metadata={
+                    "baris_ditulis": 0, "baris_sumber": 0, "status": "MENUNGGU SUMBER",
+                    "blocker": MetadataValue.text(
+                        "l1_silver.unified_audience country/city masih 0 baris. Hulunya "
+                        "l0_raw.ig_profile_official (instagram_insights_collector.py), yang "
+                        "butuh akun Business/Creator + token Insights. Tidak ada data pengganti."),
+                })
+            cur.execute(SQL_GEO_TERUKUR)
+            terkumpul, tak_dikenal = agregasi_geo_terukur(cur.fetchall())
+            for (sid, plat, tgl, level, kunci), jml in sorted(terkumpul.items()):
+                cur.execute(SQL_UPSERT_GEO_TERUKUR, (sid, plat, tgl, level, kunci, jml, CONF_TERUKUR))
+        conn.commit()
+    finally:
+        conn.close()
+    return Output(len(terkumpul), metadata={
+        "baris_sumber": n_sumber, "baris_ditulis": len(terkumpul),
+        "akun": len({k[0] for k in terkumpul}),
+        "kunci_tak_dikenal": MetadataValue.json(dict(tak_dikenal)),
+        "confidence": MetadataValue.text(f"'{CONF_TERUKUR}' (dilaporkan platform, bukan inferensi)"),
+    })
+
+
+@asset(
+    name="audience_geo_measured",
+    group_name=GROUP,
+    deps=[AssetKey("audience_gold")],
+    kinds={"postgres", "python"},
+    description=(
+        "l2_gold.audience_geo_daily (country/city) TERUKUR dari l1_silver.unified_audience "
+        "(jalur A, Instagram Insights). confidence='measured'; tanpa DELETE. Memproses 0 baris "
+        "sampai collector Insights mengisi l0_raw.ig_profile_official."
+    ),
+)
+def audience_geo_measured(postgres: PostgresResource) -> Output:
+    return _tulis_geo_terukur(postgres)
+
+
+audience_assets = [audience_feature, audience_gold, audience_age_measured, audience_geo_measured]

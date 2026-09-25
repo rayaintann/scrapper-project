@@ -219,17 +219,33 @@ def _baca_usernames(args) -> set[str] | None:
     return {u.lstrip("@").lower() for u in daftar} or None
 
 
+#: Akun milik KOL serving, lewat jembatan resmi kol_social_account (bukan username).
+SQL_AKUN_AKTIF = """
+    SELECT ksa.social_account_id
+      FROM public.kol_social_account ksa
+      JOIN public.kol_directory kd ON kd.id = ksa.kol_id
+     WHERE kd.directory_status = 'active'
+"""
+
+
 def pilih_akun(conn, args) -> list[tuple]:
     """Kandidat akun, sudah difilter platform/username dan dipotong --limit-akun.
 
     Dipisah dari `main()` supaya bisa diuji tanpa menyentuh Apify sama sekali.
+    Tanpa --usernames hanya akun milik KOL `directory_status='active'` yang
+    dipilih; daftar eksplisit boleh menyebut KOL inactive.
     """
+    pilihan = _baca_usernames(args)
     with conn.cursor() as cur:
         if args.tanggal_profil:
             cur.execute(SQL_AKUN_TANGGAL, (args.tanggal_profil,))
         else:
             cur.execute(SQL_AKUN_TERBARU)
         semua = [(str(r[0]), r[1], r[2]) for r in cur.fetchall()]
+        if pilihan is None:
+            cur.execute(SQL_AKUN_AKTIF)
+            aktif = {str(r[0]) for r in cur.fetchall()}
+            semua = [r for r in semua if r[0] in aktif]
 
         # Urutan `stale` butuh kapan follower tiap akun terakhir diambil.
         terakhir: dict[str, object] = {}
@@ -245,7 +261,6 @@ def pilih_akun(conn, args) -> list[tuple]:
     if args.platform != "semua":
         semua = [r for r in semua if r[1] == args.platform]
 
-    pilihan = _baca_usernames(args)
     if pilihan is not None:
         semua = [r for r in semua if (r[2] or "").lower() in pilihan]
 

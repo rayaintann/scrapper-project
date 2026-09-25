@@ -108,6 +108,8 @@ SOURCE_POSTS = "posts"
 SOURCE_HASHTAG = "hashtags"
 SOURCE_NAME = "name"
 SOURCE_ROSTER = "roster"
+SOURCE_ROSTER_SIBLING = "roster_sibling"
+SOURCE_SUBCATEGORY_TERMS = "subcategory_terms"
 SOURCE_ACCOUNT_FLAG = "is_business"
 
 #: Sumber yang dihitung "independen" untuk confidence tinggi.
@@ -141,6 +143,12 @@ class CreatorInput:
     manual_gender: str | None = None
     manual_age: int | None = None
     posts: tuple[Post, ...] = ()
+    #: `categories_list` baris roster LAIN dengan influencer_id yang sama (akun
+    #: platform lain dari orang yang sama). Kurasi manusia, tapi bukan baris akun
+    #: ini sendiri -- dipakai hanya bila roster akun ini tidak menentukan (Rule 3b).
+    sibling_roster_categories: tuple[str, ...] = ()
+    #: influencer_name roster (Rule 2a gender). Tidak pernah masuk evidence/keluaran.
+    roster_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +232,7 @@ class Taxonomy:
             elif self.rows.get(r.parent_id) is None or self.rows[r.parent_id].code not in L.CATEGORY_TARGETS:
                 missing.append(f"subcategory-parent:{code}")
         missing += [f"style:{k}" for k in L.STYLE_CUES if k not in self.styles]
+        missing += [f"style:{k}" for k in L.STYLE_POST_PRIORITY if k not in self.styles]
         missing += [f"personality:{k}" for k in L.PERSONALITY_FROM_STYLE if k not in self.personalities]
         for k in ("creator_personality.inspirational", "creator_personality.tech_savvy",
                   "creator_personality.expert"):
@@ -321,7 +330,10 @@ def _collect(inp: CreatorInput, lexicon: dict[str, tuple[str, ...]],
     tag_hits: dict[str, int] = {}
     post_terms: dict[str, set[str]] = {}
     for p in inp.posts:
-        cap = _norm(p.caption)
+        # Kredit kru ("make up by @mua", "photo by @x") menyebut siapa yang bekerja
+        # di balik layar, bukan topik konten: tanpa ini "make up by" dihitung bukti
+        # Beauty/Makeup untuk kreator yang kontennya bukan beauty.
+        cap = _norm(_CAT_CREDIT.sub(" ", _TST_CREDIT.sub(" ", p.caption))) if p.caption else _norm(p.caption)
         tags = _tag_tokens(p.hashtags)
         for label, terms in lexicon.items():
             h = _hits(cap, terms)
@@ -399,7 +411,8 @@ def classify_gender(inp: CreatorInput) -> Attribute:
         return Attribute(inp.manual_gender, _G.SUMBER_MANUAL, "high",
                          [Evidence("manual", inp.manual_gender, 0, "diisi manusia; tidak ditimpa")],
                          "manual")
-    h = _G.pilih_gender(inp.roster_gender, inp.display_name, inp.username)
+    h = _G.pilih_gender(inp.roster_gender, inp.display_name, inp.username,
+                        nama_roster=inp.roster_name)     # sama dengan asset creator_gender
     if not h.diketahui:
         return _unknown(f"gender: {h.alasan or 'tidak ada sinyal'}")
     return Attribute(h.nilai, h.source, h.confidence,
@@ -478,7 +491,90 @@ def _resolve(attr: Attribute, tax: Taxonomy) -> Attribute:
     return attr
 
 
+def _ambiguous_subcategory_terms(tax: Taxonomy) -> frozenset[str]:
+    """Istilah yang muncul di leksikon subkategori milik LEBIH DARI SATU kategori induk.
+    Istilah seperti itu tidak boleh menentukan induk (mis. 'decluttering')."""
+    parents: dict[str, set[str]] = {}
+    for code, terms in L.SUBCATEGORY_LEXICON.items():
+        parent = tax.rows[tax.by_code[code].parent_id].code
+        for t in terms:
+            parents.setdefault(_norm(t), set()).add(parent)
+    return frozenset(t for t, ps in parents.items() if len(ps) > 1)
+
+
+def _global_subcategory_lexicon(tax: Taxonomy, allowed: set[str] | None = None) -> dict[str, tuple[str, ...]]:
+    """Leksikon SEMUA subkategori (opsional: hanya anak dari induk `allowed`), tanpa
+    istilah yang dimiliki subkategori dari lebih dari satu induk canonical."""
+    ambiguous = _ambiguous_subcategory_terms(tax)
+    out = {}
+    for code, terms in L.SUBCATEGORY_LEXICON.items():
+        if allowed is not None and tax.rows[tax.by_code[code].parent_id].code not in allowed:
+            continue
+        clean = tuple(t for t in terms if _norm(t) not in ambiguous and t not in L.SUBCATEGORY_TERMS_NOT_FOR_PARENT)
+        if clean:
+            out[code] = clean
+    return out
+
+
+def subcategory_parent(inp: CreatorInput, tax: Taxonomy, allowed: set[str] | None = None) -> Attribute:
+    """Rule 3: tentukan SATU subkategori di seluruh taxonomy dengan aturan yang sama
+    (`_decide`: skor >= MIN_SCORE, unggul >= MIN_MARGIN), lalu kategori = induk
+    canonical-nya (`kol_categories.parent_id`). Subtopik berbeda tidak dijumlahkan."""
+    sub = _decide(_collect(inp, _global_subcategory_lexicon(tax, allowed)), "subkategori (global)",
+                  show=tax.name_of)
+    if not sub.known:
+        return sub
+    parent = tax.rows[tax.by_code[sub.value].parent_id]
+    return Attribute(parent.code, SOURCE_SUBCATEGORY_TERMS, "medium",
+                     [Evidence(SOURCE_SUBCATEGORY_TERMS, parent.code, e.weight,
+                               f"{tax.name_of(sub.value)} via {e.source}: {e.detail}") for e in sub.evidence],
+                     f"subkategori {tax.name_of(sub.value)} ({sub.reason}) -> induk canonical {parent.name}")
+
+
 def classify_category(inp: CreatorInput, tax: Taxonomy) -> Attribute:
+    """Urutan: roster akun ini (kurasi) > roster saudara (kurasi, Rule 3b) >
+    bukti kategori langsung > bukti istilah subkategori ke induk canonical (Rule 3) > Unknown."""
+    res = _classify_category_primary(inp, tax)
+    if res.known:
+        return res
+    roster, _dropped = _roster_targets(inp, tax)
+    names = lambda codes: ", ".join(tax.name_of(c) for c in sorted(codes))  # noqa: E731
+
+    # Rule 3b -- roster saudara (influencer_id sama). Kurasi, jadi di atas inference.
+    sib, _ = _roster_targets(CreatorInput(inp.kol_id, roster_categories=inp.sibling_roster_categories), tax)
+    if len(sib) == 1:
+        code = next(iter(sib))
+        if not roster or code in roster:
+            why = ("roster akun ini kosong" if not roster
+                   else f"roster akun ini menyebut {names(roster)}; baris saudara hanya {tax.name_of(code)}")
+            return _resolve(Attribute(code, SOURCE_ROSTER_SIBLING, "medium",
+                                      [Evidence(SOURCE_ROSTER_SIBLING, code, 0,
+                                                "categories_list roster saudara (influencer_id sama)")],
+                                      f"roster saudara; {why}"), tax)
+
+    # Rule 3 -- subkategori yang terklasifikasi menentukan induk canonical-nya. Hanya bila
+    # bukti langsung tidak memutuskan; di antara pilihan roster bila roster menyebut beberapa.
+    allowed = roster if len(roster) > 1 else None
+    pick = subcategory_parent(inp, tax, allowed)
+    if not pick.known:
+        return res
+    # Bukti langsung yang BERTENTANGAN tetap Unknown: Rule 3 tidak boleh memutus konflik
+    # antara kategori lain yang masing-masing sudah memenuhi ambang.
+    direct = _collect(inp, L.CATEGORY_LEXICON, declared=L.BUSINESS_CATEGORY_TO_CATEGORY,
+                      labels=allowed or set(L.CATEGORY_TARGETS))
+    rivals = sorted(k for k, es in direct.items()
+                    if k != pick.value and sum(e.weight for e in es) >= MIN_SCORE)
+    if rivals:
+        res.reason += (f"; istilah subkategori menunjuk {tax.name_of(pick.value)} tapi bukti langsung "
+                       f"menunjuk {', '.join(tax.name_of(r) for r in rivals)} (tetap Unknown)")
+        return res
+    if allowed:
+        pick.source = f"{SOURCE_ROSTER}+{SOURCE_SUBCATEGORY_TERMS}"
+        pick.reason += f"; di antara pilihan roster {names(allowed)}"
+    return _resolve(pick, tax)
+
+
+def _classify_category_primary(inp: CreatorInput, tax: Taxonomy) -> Attribute:
     roster, dropped = _roster_targets(inp, tax)
     ev = _collect(inp, L.CATEGORY_LEXICON, declared=L.BUSINESS_CATEGORY_TO_CATEGORY,
                   labels=set(L.CATEGORY_TARGETS))
@@ -546,23 +642,80 @@ def _post_hit_counts(posts: list[Post], cues: dict[str, tuple[str, ...]]) -> dic
     return counts
 
 
+_POST_RX = {k: tuple(re.compile(p, re.I | re.S) for p in v) for k, v in L.STYLE_POST_PATTERNS.items()}
+_TST_PAID = tuple(re.compile(p, re.I) for p in L.TESTIMONIAL_PAID)
+_TST_CLAIM = tuple(re.compile(p, re.I | re.S) for p in L.TESTIMONIAL_CLAIM)
+_TST_CREDIT = re.compile(L.TESTIMONIAL_CREDIT, re.I)
+_CAT_CREDIT = re.compile(L.CATEGORY_CREDIT, re.I)
+_MENTION = re.compile(r"@[a-z0-9_.]{2,}", re.I)
+_TESTIMONIAL = "communication_style.testimonial"
+_TST_STRONG = tuple(re.compile(p, re.I) for p in L.TESTIMONIAL_STRONG_CLAIM)
+_TST_BRAND = re.compile(L.TESTIMONIAL_BRAND_HANDLE, re.I)
+
+
+def _is_testimonial(text: str) -> bool:
+    """Endorsement: sinyal brand (mention non-kredit atau penanda iklan) + klaim/ajakan."""
+    if any(r.search(text) for r in _TST_PAID) or any(r.search(text) for r in _TST_STRONG):
+        return True
+    clean = _TST_CREDIT.sub(" ", text)
+    if _TST_BRAND.search(clean):
+        return True
+    brand = _MENTION.findall(clean)
+    return bool(brand) and any(r.search(text) for r in _TST_CLAIM)
+
+
+def post_style(p: Post) -> str | None:
+    """SATU label style untuk satu post dari caption + hashtag (multi-sinyal), atau None.
+    Pola per label ada di `L.STYLE_POST_PATTERNS`; bila beberapa cocok dipakai urutan
+    `L.STYLE_POST_PRIORITY` (bentuk konten > ajakan interaksi > testimonial)."""
+    raw = (p.caption or "").lower()
+    if not raw.strip():
+        return None
+    tags = " ".join("#" + str(h).lower().lstrip("#") for h in p.hashtags or ())
+    text = raw + "\n" + tags
+    hits = {k for k, rx in _POST_RX.items() if any(r.search(text) for r in rx)}
+    if _is_testimonial(text):
+        hits.add("communication_style.testimonial")
+    for k in L.STYLE_POST_PRIORITY:
+        if k in hits:
+            return k
+    return None
+
+
 def classify_style(inp: CreatorInput) -> Attribute:
+    """Style kreator = label post (`post_style`) yang dominan. Ambang TETAP:
+    >= STYLE_MIN_POSTS post ber-caption, label muncul di >= STYLE_MIN_HITS post dan
+    >= STYLE_MIN_RATIO dari post ber-caption; seri -> Unknown."""
     posts = _captioned(inp)
     n = len(posts)
     if n < STYLE_MIN_POSTS:
         return _unknown(f"style: hanya {n} post ber-caption (< {STYLE_MIN_POSTS})")
-    counts = _post_hit_counts(posts, L.STYLE_CUES)
+    counts: dict[str, int] = {}
+    for p in posts:
+        k = post_style(p)
+        if k:
+            counts[k] = counts.get(k, 0) + 1
     ok = sorted(((c, k) for k, c in counts.items()
                  if c >= STYLE_MIN_HITS and c / n >= STYLE_MIN_RATIO), key=lambda x: (-x[0], x[1]))
     ev = [Evidence(SOURCE_POSTS, k, 0, f"{c}/{n} post") for k, c in sorted(counts.items())]
     if not ok:
         return _unknown(f"style: tidak ada pola yang muncul di >= {STYLE_MIN_HITS} post "
                         f"dan >= {int(STYLE_MIN_RATIO * 100)}% dari {n} post", ev)
+    note = ""
     if len(ok) > 1 and ok[0][0] == ok[1][0]:
-        return _unknown(f"style: seri {ok[0][1]} vs {ok[1][1]} ({ok[0][0]}/{n} post)", ev)
+        tied = {k for c, k in ok if c == ok[0][0]}
+        forms = tied - {_TESTIMONIAL}
+        # Endorsement bukan bentuk konten: seri antara SATU bentuk konten dan testimonial
+        # -> bentuk kontennya (aturan rubric yang sama dengan tingkat post). Seri lain -> Unknown.
+        if _TESTIMONIAL in tied and len(forms) == 1:
+            key = forms.pop()
+            ok = [(c, k) for c, k in ok if k == key]
+            note = f"; seri dengan testimonial, bentuk konten dipilih"
+        else:
+            return _unknown(f"style: seri {ok[0][1]} vs {ok[1][1]} ({ok[0][0]}/{n} post)", ev)
     c, key = ok[0]
     conf = "high" if n >= 6 and c / n >= 0.5 else "medium"
-    return Attribute(key, "caption_pattern", conf, ev, f"{c}/{n} post")
+    return Attribute(key, "caption_pattern", conf, ev, f"{c}/{n} post{note}")
 
 
 def classify_personality(inp: CreatorInput, role: Attribute, category: Attribute) -> Attribute:
@@ -570,11 +723,12 @@ def classify_personality(inp: CreatorInput, role: Attribute, category: Attribute
     n = len(posts)
     if n < PERSONALITY_MIN_POSTS:
         return _unknown(f"personality: hanya {n} post ber-caption (< {PERSONALITY_MIN_POSTS})")
-    style = _post_hit_counts(posts, L.STYLE_CUES)
     extra = _post_hit_counts(posts, {"inspirational": L.INSPIRATIONAL_CUES, "tech": L.TECH_CUES})
+    # Satu label style per post (detektor yang sama dengan classify_style), dihitung sekali.
+    labels = [post_style(p) for p in posts]
 
     def union(keys: tuple[str, ...]) -> int:
-        return sum(1 for p in posts if _post_hit_counts([p], {k: L.STYLE_CUES[k] for k in keys}))
+        return sum(1 for lab in labels if lab in keys)
 
     cand: dict[str, tuple[int, str]] = {}
     for pkey, skeys in L.PERSONALITY_FROM_STYLE.items():

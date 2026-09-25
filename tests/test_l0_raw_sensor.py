@@ -460,6 +460,8 @@ class RantaiSampaiL2(unittest.TestCase):
             # Dua fitur UMUR, ikut chain sejak migration 042. Terpisah karena
             # memang dua fitur: umur AUDIENS vs umur KREATOR.
             (audience, "_tulis_age_terukur"),
+            # Lokasi AUDIENS terukur (jalur A), pasangan umur terukur.
+            (audience, "_tulis_geo_terukur"),
             (creator_age, "_jalankan"),
             # Gender KREATOR, migration 051. Bukan fitur audiens.
             (creator_gender, "_jalankan"),
@@ -498,6 +500,7 @@ class RantaiSampaiL2(unittest.TestCase):
         # kalau salah satu dilepas dari chain, pesan gagalnya menyebut fitur
         # mana yang hilang.
         self.assertIn("audience_age_measured", dijalankan)
+        self.assertIn("audience_geo_measured", dijalankan)
         self.assertIn("creator_age", dijalankan)
         self.assertIn("creator_gender", dijalankan)
 

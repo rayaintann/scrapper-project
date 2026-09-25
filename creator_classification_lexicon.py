@@ -209,12 +209,22 @@ CATEGORY_LEXICON: dict[str, tuple[str, ...]] = {
                       "stand up comedy", "standup", "musisi", "musician", "singer", "penyanyi",
                       "band", "cover lagu", "dancer", "penari", "dance", "film", "movie",
                       "prank", "sketsa komedi", "entertainer", "presenter", "host",
-                      "podcast", "podcaster"),
+                      "podcast", "podcaster",
+                      # audit false-negative 2026-09-24 (cohort 100): istilah genre yang jelas
+                      "sinetron", "ftv", "sinden", "pesinden", "dangdut", "campursari",
+                      "konser", "concert"),
 }
 
 # ===========================================================================
 # SUBKATEGORI -- target = kode kol_categories (level 'sub_category')
 # ===========================================================================
+#: Istilah subkategori yang BOLEH memilih subkategori di bawah induk yang sudah
+#: diketahui, tapi TIDAK boleh menentukan induk (Rule 3): nama tempat menyatakan
+#: lokasi/domisili, bukan topik konten.
+SUBCATEGORY_TERMS_NOT_FOR_PARENT = frozenset({
+    "bali", "lombok", "labuan bajo", "jogja", "bromo", "raja ampat",
+})
+
 SUBCATEGORY_LEXICON: dict[str, tuple[str, ...]] = {
     "BEA.SKN": ("skincare", "skin care", "sunscreen", "serum", "moisturizer", "jerawat",
                 "acne", "kulit wajah", "skincare routine"),
@@ -225,9 +235,10 @@ SUBCATEGORY_LEXICON: dict[str, tuple[str, ...]] = {
     "ENT.COM": ("comedy", "komedi", "komedian", "comedian", "stand up comedy", "standup",
                 "lucu", "prank", "sketsa komedi"),
     "ENT.FLM": ("film", "movie", "series", "drakor", "review film", "movie review",
-                "netflix", "sinema", "aktor", "aktris", "actor", "actress"),
+                "netflix", "sinema", "aktor", "aktris", "actor", "actress", "sinetron", "ftv"),
     "ENT.MUS": ("music", "musik", "musisi", "musician", "singer", "penyanyi", "band",
-                "cover lagu", "gitaris", "guitarist", "vocalist"),
+                "cover lagu", "gitaris", "guitarist", "vocalist", "sinden", "pesinden", "dangdut",
+                "campursari", "konser", "concert"),
     "FAS.HJB": ("hijab", "hijabers", "hijab style", "modest fashion", "jilbab", "kerudung",
                 "hijab tutorial"),
     "FAS.LOC": ("local brand", "brand lokal", "produk lokal", "bangga buatan indonesia",
@@ -363,7 +374,7 @@ STYLE_NOT_INFERABLE = frozenset({
     "visual_style.cinematic", "visual_style.colorful", "visual_style.lifestyle",
     "visual_style.minimalist", "content_style.aesthetic", "content_style.talking_head",
     "content_style.entertaining", "communication_style.visual_first",
-    "communication_style.conversational", "communication_style.demonstrative",
+    "communication_style.demonstrative",
     "communication_style.demonstration", "communication_style.humorous",
     "communication_style.educational", "communication_style.storytelling",
 })
@@ -377,6 +388,10 @@ PERSONALITY_FROM_STYLE: dict[str, tuple[str, ...]] = {
     "creator_personality.reviewer": ("content_style.review",),
     "creator_personality.educational": ("content_style.educational", "content_style.tutorial"),
     "creator_personality.humorous": ("content_style.comedy",),
+    # Relatable = berbicara langsung ke audiens + membagikan keseharian/pengalaman sendiri
+    # sebagai pola DOMINAN (>= PERSONALITY_MIN_HITS post dan >= PERSONALITY_MIN_RATIO).
+    "creator_personality.relatable": ("communication_style.conversational", "content_style.vlog",
+                                      "content_style.storytelling"),
 }
 INSPIRATIONAL_CUES = ("motivasi", "inspirasi", "semangat", "mindset", "never give up",
                       "jangan menyerah", "bersyukur", "percaya diri", "self love", "inspirational")
@@ -388,7 +403,90 @@ TECH_CUES = ("gadget", "teknologi", "tech", "smartphone", "laptop", "aplikasi", 
 #: pola teks yang bisa dibedakan secara deterministik dari caption.
 PERSONALITY_NOT_INFERABLE = frozenset({
     "creator_personality.premium", "creator_personality.luxury",
-    "creator_personality.relatable", "creator_personality.casual",
+    "creator_personality.casual",
     "creator_personality.creative", "creator_personality.professional",
     "creator_personality.entertaining",
 })
+
+# ===========================================================================
+# STYLE PER POST -- detektor multi-sinyal (rubric: docs/STYLE_RUBRIC di laporan)
+# ===========================================================================
+# Satu post -> SATU label atau None. Tiap label punya pola FRASA (regex, dicocokkan
+# pada caption huruf kecil apa adanya, termasuk '@' dan '?'), bukan satu kata lepas.
+# Dievaluasi pada 200 post berlabel (cohort 100, 24 Sep 2026): lihat laporan
+# Classification Improvement. Urutan STYLE_POST_PRIORITY menentukan label bila
+# beberapa cocok: BENTUK konten (tutorial/review/...) di atas ajakan interaksi,
+# dan testimonial paling akhir -- testimonial hanya bila post terutama endorsement.
+STYLE_POST_PATTERNS: dict[str, tuple[str, ...]] = {
+    "content_style.tutorial": (
+        r"\btutorial\b", r"\bhow to\b", r"\bstep by step\b", r"\bresep\b", r"\bcara (bikin|membuat|pakai|pake|masak)\b",
+        r"\bbahan\s*:", r"\bbumbu\s*:", r"\bracikan\b", r"\btips and trick", r"#\w*hacks?\b", r"\b(beauty|makeup|life) ?hacks?\b",
+        r"(^|\n)\s*1[\.\)]\s.+\n\s*2[\.\)]\s"),
+    "content_style.review": (
+        r"\breview\b", r"\bulasan\b", r"\bworth (it|every)\b", r"\bworth (nggak|gak|ga)\b", r"\bfirst impression",
+        r"\bhonest\b", r"\b\d{1,2}\s*/\s*10\b", r"\brating\s*\d", r"\bkelebihan", r"\bkekurangan", r"\bunboxing\b",
+        r"\btes(t)? brutal\b", r"\b(flavou?r|shade) guide\b", r"❌.*✅|✅.*❌", r"\bkenapa wajib\b"),
+    "content_style.educational": (
+        r"\btahukah\b", r"\bdid you know\b", r"\bfakta\b", r"\btips\b(?! and trick)", r"\bkasih tau (nih|ya)\b",
+        r"\bkenapa\b[^?]*\?[^.]*\bkarena\b", r"\bpenjelasan\b", r"\bedukasi\b", r"\binfografis\b"),
+    "content_style.demo": (r"\beksperimen\b", r"\bexperimen\b", r"\bpercobaan\b", r"\bdemo\b"),
+    "content_style.commentary": (
+        r"\bmenurut (aku|gue|gw|saya)\b", r"\bopini\b", r"\bklarifikasi\b", r"\bmeluruskan\b", r"\btanggapan\b",
+        r"\bhot take\b", r"\breact(ion|ing)?\b"),
+    "content_style.storytelling": (
+        r"\bstory ?time\b", r"\btrue story\b", r"\bkisah\b", r"\bpengalaman(ku| aku| gue)\b",
+        r"\bmulai .{0,40}\btahun \d{4}\b"),
+    "content_style.vlog": (
+        r"\bvlog\b", r"\bday in (my|a) life\b", r"\bgrwm\b", r"\bget ready with me\b", r"\bdump\b",
+        r"\bbehind the (scenes|stage)\b", r"\bdi ?balik layar\b", r"\bjalan[ -]jalan ke\b", r"\bmelipir\b",
+        r"\bseharian (aku|gue|di)\b", r"\blast day\b", r"\bglimpse\b", r"\bwrap(ped)? for\b", r"\bdekor buat\b",
+        r"\byesterday was\b", r"\bfirst time in\b", r"#brandtrip", r"\btrip dump\b", r"\b(morning|night|daily) routine\b",
+        r"#dailyvlog"),
+    "content_style.comedy": (
+        r"\bprank\b", r"\bparodi\b", r"\bsketsa\b", r"\bkomedi", r"\bcomedy\b", r"#meme", r"\bfenomena .{0,30}ketika\b",
+        r"\bstand ?up\b", r"#\w*komedi\w*", r"\bmajelis ?lucu\b",
+        r"\biya apa betul\b"),
+    "communication_style.conversational": (
+        r"\bkalian\b[^?\n]{0,60}\?", r"\bsiapa (yang|yg|juga)\b[^?\n]{0,60}\?", r"\bada yang\b[^?\n]{0,60}\?",
+        r"\btim (mana|yang mana|yg mana)\b", r"\bkomen(tar)? (di bawah|ya|dong)\b", r"\bmana suaranya\b",
+        r"\bkasih rating\b", r"\bkota mana\b", r"\bmenurut kalian\b", r"\bkamu\b[^?\n]{0,60}\?",
+        r"\b(setuju|anyone|relate|teman2|temen2|besti|guys)\b[^\n]{0,60}\?", r"\bnext \w+ (mana|apa)\b[^\n]{0,20}\?",
+        r"\bapa lagi\b[^\n]{0,40}\?", r"\b(lu|lo|elu|you|u)\b[^\n?]{0,60}\?"),
+}
+STYLE_POST_PRIORITY: tuple[str, ...] = (
+    "content_style.tutorial", "content_style.review", "content_style.educational", "content_style.demo",
+    "content_style.commentary", "content_style.storytelling", "content_style.vlog", "content_style.comedy",
+    "communication_style.conversational", "communication_style.testimonial",
+)
+#: Testimonial = sinyal BRAND (mention @akun yang bukan kredit kru, atau penanda iklan)
+#: DAN klaim pemakaian / rekomendasi / ajakan beli.
+TESTIMONIAL_PAID = (r"#ad\b", r"#sponsored\b", r"\bpaid partnership\b", r"\bsponsored\b", r"#endorse")
+TESTIMONIAL_CLAIM = (
+    r"\bpake\b", r"\bpakai\b", r"\bpemakaian\b", r"\bnyobain\b", r"\bcobain\b", r"\bnyoba\b", r"\bdipake\b",
+    r"\bmy (current|fav|favorite)\b", r"\bgo-?to\b", r"\bfav\b", r"\bfavorit", r"\bkode\b", r"\bvoucher\b",
+    r"\bdiskon\b", r"\bpromo\b", r"\blink di bio\b", r"\bcek (di|link|langsung)\b", r"\bcheck ?out\b", r"\bmy @",
+    r"\bstok\b", r"\bbeli\b", r"\bwar\b", r"\bmust have\b", r"\bfrom @", r"\bwith (my )?@", r"\bvia @",
+    r"\bterima ?kasih\b.*@", r"\bthank(s| you)\b.*@", r"\bditemenin\b", r"\bditemani\b", r"\bbersama @",
+    r"\bsatu lagi dari @", r"\bdari @", r"\bmemakai\b", r"\bsemangat .{0,20}\bpake\b", r"\bsamaan\b", r"\bshare ke\b",
+    r"\bsuper love\b", r"\bproduk ini\b", r"\bproduknya\b", r"\bbrand\b", r"\btest drive\b", r"\bikutan\b")
+#: Mention yang merupakan KREDIT kru, bukan brand yang di-endorse.
+TESTIMONIAL_CREDIT = (r"\b(mua|make ?up|makeup by|hair|photo(grapher)?|photos by|video(grapher)?|video by|record|"
+                      r"styling|stylist|wardrobe|attire|decoration|documentation|wo|mc|music|editor|asisten|"
+                      r"fashion editor|digital editor|credit footage|post by)\s*:?\s*(by\s*)?@\S+")
+#: Kredit kru dengan NAMA sebelum handle ("make up by nakku @cipampaa"). Hanya dipakai
+#: bukti KATEGORI (bukan style). Sengaja tanpa dress/outfit: kredit busana bisa jadi bukti Fashion.
+CATEGORY_CREDIT = (r"\b(make ?up|mua|hair ?do|hair|photos?|photographer|video|videographer|styling|stylist)"
+                   r"\s*(by)?\s*:?\s*[\w .'-]{0,20}@\S+")
+#: Klaim produk yang cukup SENDIRI (tanpa mention brand) untuk testimonial.
+TESTIMONIAL_STRONG_CLAIM = (
+    r"\bpake (ini|produk)", r"\bpakai (ini|produk)", r"\bproduk ini\b", r"\bpemakaian", r"\bmust have\b",
+    r"\bmy current\b", r"\bholy grail\b", r"\bdipake\b", r"\bga sia sia war\b", r"#racun", r"🛒",
+    r"\bmust ?hav", r"\befek\b.{0,30}\bnyata\b", r"\b(muka|kulit|rambut|bibir) (aku|ku|gue) jadi\b", r"\bapproved\b",
+    r"\bjawabannya\b.{0,40}#",
+    # putaran 3 (error analysis test 2): frasa endorsement umum
+    r"\bklik keranjang\b", r"\bselalu jadi pilihan\b", r"\bthe new face of\b", r"\bbrand ambassador\b",
+    r"\bambassador (of|for|dari)\b", r"\bpart of the \w+ family\b", r"\bavailable (now |only )?(at|di)\b",
+    r"\bi bet (u|you) would love\b", r"\blove it\b.{0,30}@", r"\bonly at @",
+    r"\bkeranjang kuning\b", r"\byuk,? (makan|minum|pakai|pake|cobain|beli|test drive|samaan)\b")
+#: Handle berbentuk akun brand (akhiran/penanda umum akun resmi) -- sinyal brand sendiri.
+TESTIMONIAL_BRAND_HANDLE = r"@[a-z0-9_.]*(\.id|_id|indonesia|_official|\.official|official|store|beauty|cosmetics?|skincare)\b"

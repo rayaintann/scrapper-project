@@ -41,12 +41,22 @@ INTEREST_SOURCES = ("audience", "content_inferred")      # nilai existing featur
 
 MIN_KNOWN = 5
 GENDER_SHARE_MIN = 60.0
+#: Nilai gender audiens bila >= MIN_KNOWN diketahui dan tidak ada sisi >= GENDER_SHARE_MIN.
+#: Sama dengan pilihan 'Balanced' di Brand Profile (Autometric GENDER_MAJORITIES).
+BALANCED = "balanced"
 _RANK = {"low": 1, "medium": 2, "high": 3}
 _CONF = {"inferred_high": "high", "inferred_medium": "medium", "inferred_low": "low",
-         "high": "high", "medium": "medium", "low": "low"}
+         "high": "high", "medium": "medium", "low": "low",
+         # jalur A (Instagram Insights): dilaporkan platform, bukan inferensi
+         "measured": "high"}
 
 SRC_GENDER = "feature.audience_analysis.female_pct/male_pct"
 SRC_AGE = "feature.audience_analysis.age_gender_breakdown"
+SRC_AGE_MEASURED = "l2_gold.audience_demographics_daily[age,measured]"
+#: Label kurasi (migration 054) di baris Analysis Audience yang sama: dipakai HANYA bila
+#: hasil measured/inferred Unknown. Tidak ditulis asset audience_feature.
+SRC_CURATED = "feature.audience_analysis.curated_*"
+CURATED_ATTRS = ("gender", "age", "country", "city")
 SRC_GEO = "l2_gold.audience_geo_daily"
 SRC_INTEREST = "feature.audience_analysis.interest_top"
 
@@ -69,6 +79,10 @@ class AudienceInput:
     interest_top: str | None = None
     interest_source: str | None = None
     followers_analyzed: int | None = None
+    #: umur TERUKUR (Insights, jalur A) pada tanggal terukur terakhir; menang atas inferred
+    age_measured: dict[str, float] = field(default_factory=dict)
+    #: label kurasi per atribut: attr -> (nilai, confidence); fallback terakhir
+    curated: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def _unknown(reason: str, evidence: list[Evidence] | None = None) -> Attribute:
@@ -95,14 +109,29 @@ def classify_gender(inp: AudienceInput) -> Attribute:
     if known < MIN_KNOWN:
         return _unknown(f"gender audiens: hanya {known:g} follower diketahui (< {MIN_KNOWN})", ev)
     value, share = ("female", inp.female_pct) if inp.female_pct > inp.male_pct else ("male", inp.male_pct)
-    if inp.female_pct == inp.male_pct or share < GENDER_SHARE_MIN:
-        return _unknown(f"gender audiens: seimbang ({inp.female_pct:g}% female / {inp.male_pct:g}% male)", ev)
     conf = (inp.gender_reliability or "").lower()
-    return Attribute(value, SRC_GENDER, conf if conf in _RANK else "low", ev,
+    conf = conf if conf in _RANK else "low"
+    if inp.female_pct == inp.male_pct or share < GENDER_SHARE_MIN:
+        # Cukup follower diketahui (>= MIN_KNOWN) tapi tidak ada sisi yang mencapai
+        # GENDER_SHARE_MIN: itu TEMUAN "balanced", bukan ketiadaan data. Ambang tetap;
+        # yang berubah hanya hasil ini tidak lagi dilaporkan sebagai Unknown.
+        return Attribute(BALANCED, SRC_GENDER, conf, ev,
+                         f"seimbang ({inp.female_pct:g}% female / {inp.male_pct:g}% male) "
+                         f"dari {known:g} follower yang gendernya diketahui")
+    return Attribute(value, SRC_GENDER, conf, ev,
                      f"{share:g}% dari {known:g} follower yang gendernya diketahui")
 
 
 def classify_age(inp: AudienceInput) -> Attribute:
+    if inp.age_measured:
+        # Jalur A: sebaran umur dilaporkan platform. Ambang yang SAMA (MIN_KNOWN, top unik).
+        counts = {k: v for k, v in inp.age_measured.items() if k in AGE_BUCKETS}
+        key, n, known, why = _known_top(counts)
+        ev = [Evidence(SRC_AGE_MEASURED, "known", 0, f"{known:g} follower terukur")]
+        if key is not None:
+            return Attribute(key, SRC_AGE_MEASURED, "high", ev, f"{n:g}/{known:g} follower (Insights)")
+        if not inp.has_data:
+            return _unknown(f"umur audiens: {why}", ev)
     if not inp.has_data:
         return _unknown("umur audiens: tidak ada feature audience")
     counts = {k: v for k, v in inp.age_counts.items() if k in AGE_BUCKETS}
@@ -115,7 +144,8 @@ def classify_age(inp: AudienceInput) -> Attribute:
 
 
 def _classify_geo(geo: dict, level: str, has_data: bool) -> Attribute:
-    if not has_data or not geo:
+    # Baris geo terukur (Insights) boleh ada tanpa feature follower -> cukup `geo` terisi.
+    if not geo:
         return _unknown(f"{level} audiens: tidak ada baris {SRC_GEO}[{level}]")
     counts = {k: v for k, (v, _c) in geo.items() if k and k.lower() != "unknown"}
     unknown = sum(v for k, (v, _c) in geo.items() if not k or k.lower() == "unknown")
@@ -145,9 +175,20 @@ def classify_interest(inp: AudienceInput) -> Attribute:
                      "interest_source=" + str(inp.interest_source))
 
 
+def _with_curated(attr: str, res: Attribute, inp: AudienceInput) -> Attribute:
+    """Measured/inferred selalu menang; label kurasi hanya mengisi yang Unknown."""
+    if res.known or attr not in inp.curated:
+        return res
+    value, conf = inp.curated[attr]
+    return Attribute(value, SRC_CURATED, conf if conf in _RANK else "low",
+                     res.evidence + [Evidence(SRC_CURATED, value, 0, "label kurasi (fallback)")],
+                     f"label kurasi; measured/inferred Unknown ({res.reason})")
+
+
 def classify(inp: AudienceInput) -> dict[str, Attribute]:
-    return {"gender": classify_gender(inp), "age": classify_age(inp), "city": classify_city(inp),
-            "country": classify_country(inp), "interest": classify_interest(inp)}
+    out = {"gender": classify_gender(inp), "age": classify_age(inp), "city": classify_city(inp),
+           "country": classify_country(inp), "interest": classify_interest(inp)}
+    return {a: _with_curated(a, r, inp) for a, r in out.items()}
 
 
 def validate(res: dict[str, Attribute]) -> list[str]:
@@ -158,7 +199,7 @@ def validate(res: dict[str, Attribute]) -> list[str]:
         if v.known and (not v.source or v.confidence not in _RANK):
             out.append(f"{a}: source/confidence tidak sah ({v.source}, {v.confidence})")
     g, age, c, i = res.get("gender"), res.get("age"), res.get("country"), res.get("interest")
-    if g and g.known and g.value not in ("female", "male"):
+    if g and g.known and g.value not in ("female", "male", BALANCED):
         out.append(f"gender audiens tidak sah: {g.value!r}")
     if age and age.known and age.value not in AGE_BUCKETS:
         out.append(f"umur audiens tidak sah: {age.value!r}")
@@ -172,23 +213,71 @@ def validate(res: dict[str, Attribute]) -> list[str]:
 # ---------------------------------------------------------------------------
 # DB (read-only) -- tabel existing Audience Analysis
 # ---------------------------------------------------------------------------
-SQL_FEATURE = """
+SQL_FEATURE_TMPL = """
     SELECT social_account_id::text, 'instagram', gender_breakdown, female_pct, male_pct, gender_known_pct,
-           age_gender_breakdown, interest_top, interest_source
+           age_gender_breakdown, interest_top, interest_source, {cur}
       FROM feature.ig_audience_analysis
     UNION ALL
     SELECT social_account_id::text, 'tiktok', gender_breakdown, female_pct, male_pct, gender_known_pct,
-           age_gender_breakdown, interest_top, interest_source
+           age_gender_breakdown, interest_top, interest_source, {cur}
       FROM feature.tt_audience_analysis"""
+CURATED_COLS = "curated_gender, curated_age, curated_country, curated_city, curated_evidence"
+#: Sebelum migration 054 kolom curated_* belum ada: dibaca sebagai NULL.
+SQL_FEATURE = SQL_FEATURE_TMPL.format(cur=CURATED_COLS)
+SQL_FEATURE_NO_CURATED = SQL_FEATURE_TMPL.format(cur="NULL, NULL, NULL, NULL, NULL::jsonb")
+SQL_HAS_CURATED = """
+    SELECT count(*) = 2 FROM information_schema.columns
+     WHERE table_schema = 'feature' AND table_name IN ('ig_audience_analysis', 'tt_audience_analysis')
+       AND column_name = 'curated_gender'"""
 SQL_RELIABILITY = """
     SELECT social_account_id::text, gender_reliability FROM l2_gold.kol_profile_card
      WHERE gender_reliability IS NOT NULL"""
+#: Geo per akun dari SEMUA tanggal, bukan hanya tanggal terakhir.
+#:
+#: Baris `inferred_*` di L2 adalah hasil satu batch scraping follower per
+#: tanggal, dan batch-batch itu berisi follower yang BERBEDA (unified_follower
+#: unik per akun+follower+tanggal; cohort 100: 7.499 baris = 7.499 follower).
+#: Membaca tanggal terakhir saja membuang follower dari batch sebelumnya -- 28
+#: akun cohort punya lebih dari satu tanggal -- padahal gender/umur di classifier
+#: yang sama dibaca dari feature yang sudah menjumlah semua tanggal. Jumlahnya
+#: di sini sama dengan cara feature menjumlah; ambang (MIN_KNOWN) tidak berubah.
+#:
+#: Baris `measured` (Insights) adalah snapshot kumulatif, jadi TIDAK dijumlah:
+#: akun yang punya data terukur hanya memakai snapshot terukur terakhirnya.
+#: Confidence satu kunci = yang TERLEMAH dari baris penyusunnya (aturan
+#: `_modus_confidence` di asset audience).
 SQL_GEO = """
-    SELECT g.social_account_id::text, g.geo_level, g.geo_key, g.audience_count, g.confidence
-      FROM l2_gold.audience_geo_daily g
-     WHERE g.geo_level IN ('city', 'country')
-       AND g.audience_date = (SELECT max(x.audience_date) FROM l2_gold.audience_geo_daily x
-                               WHERE x.social_account_id = g.social_account_id)"""
+    WITH g AS (
+        SELECT g.*, max(g.audience_date) FILTER (WHERE g.confidence = 'measured')
+                        OVER (PARTITION BY g.social_account_id) AS measured_date
+          FROM l2_gold.audience_geo_daily g
+         WHERE g.geo_level IN ('city', 'country'))
+    SELECT social_account_id::text, geo_level, geo_key, sum(audience_count),
+           (array_agg(confidence ORDER BY CASE confidence WHEN 'inferred_low' THEN 0
+                                                          WHEN 'inferred_medium' THEN 1
+                                                          WHEN 'inferred_high' THEN 2
+                                                          ELSE 3 END))[1]
+      FROM g
+     WHERE measured_date IS NULL
+        OR (confidence = 'measured' AND audience_date = measured_date)
+     GROUP BY 1, 2, 3"""
+
+
+#: Umur TERUKUR (jalur A, asset `audience_age_measured`), hanya tanggal terukur terakhir
+#: per akun -- snapshot Insights bersifat kumulatif, jadi tidak dijumlah antar tanggal.
+SQL_AGE_MEASURED = """
+    SELECT d.social_account_id::text, d.platform, d.dimension_key, d.audience_count
+      FROM l2_gold.audience_demographics_daily d
+     WHERE d.audience_type = 'age' AND d.confidence = 'measured'
+       AND d.audience_date = (SELECT max(x.audience_date) FROM l2_gold.audience_demographics_daily x
+                               WHERE x.social_account_id = d.social_account_id
+                                 AND x.audience_type = 'age' AND x.confidence = 'measured')"""
+
+
+def _curated(g, age, country, city, ev) -> dict[str, tuple[str, str]]:
+    ev = ev or {}
+    vals = {"gender": g, "age": age, "country": country, "city": city}
+    return {a: (v, str((ev.get(a) or {}).get("confidence") or "low")) for a, v in vals.items() if v}
 
 
 def _num(v) -> float:
@@ -211,9 +300,16 @@ def load(conn) -> dict[str, AudienceInput]:
         geo: dict[str, dict[str, dict]] = defaultdict(lambda: {"city": {}, "country": {}})
         for sa, level, key, n, conf in cur.fetchall():
             geo[sa][level][key] = (_num(n), conf)
-        cur.execute(SQL_FEATURE)
+        cur.execute(SQL_AGE_MEASURED)
+        age_m: dict[str, dict[str, float]] = defaultdict(dict)
+        plat_m: dict[str, str] = {}
+        for sa, plat, key, n in cur.fetchall():
+            age_m[sa][key] = age_m[sa].get(key, 0) + _num(n)
+            plat_m[sa] = plat
+        cur.execute(SQL_HAS_CURATED)
+        cur.execute(SQL_FEATURE if cur.fetchone()[0] else SQL_FEATURE_NO_CURATED)
         out = {}
-        for sa, platform, gb, fp, mp, kp, agb, itop, isrc in cur.fetchall():
+        for sa, platform, gb, fp, mp, kp, agb, itop, isrc, c_g, c_age, c_co, c_ci, c_ev in cur.fetchall():
             gb, agb = gb or {}, agb or {}
             g = geo.get(sa, {"city": {}, "country": {}})
             out[sa] = AudienceInput(
@@ -227,5 +323,13 @@ def load(conn) -> dict[str, AudienceInput]:
                 city=g["city"], country=g["country"],
                 interest_top=itop, interest_source=isrc,
                 followers_analyzed=int(_num(agb.get("followers_analyzed"))) or None,
+                age_measured=age_m.get(sa, {}),
+                curated=_curated(c_g, c_age, c_co, c_ci, c_ev),
             )
+    # Akun dengan data terukur tapi tanpa feature follower: tetap dibaca (bukan dibuang).
+    for sa in set(age_m) | {s for s, g in geo.items() if any(c == "measured" for lv in g.values() for _v, c in lv.values())}:
+        if sa not in out:
+            g = geo.get(sa, {"city": {}, "country": {}})
+            out[sa] = AudienceInput(platform=plat_m.get(sa), has_data=False, city=g["city"], country=g["country"],
+                                    age_measured=age_m.get(sa, {}))
     return out

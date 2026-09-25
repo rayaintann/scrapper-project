@@ -303,7 +303,9 @@ def select_profile_target(
             "\n              AND ltrim(lower(btrim(split_part(k.username, '?', 1))), '@') "
             "= %(username)s"
             if kunci
-            else ""
+            # Tanpa kunci username = pemilihan otomatis: hanya KOL serving. KOL
+            # inactive hanya di-scrape bila diminta eksplisit (lalu aktif lagi).
+            else "\n              AND k.directory_status = 'active'"
         )
         query = f"""
             SELECT k.id::text, s.id::text, p.key, k.username
