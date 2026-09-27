@@ -182,12 +182,16 @@ def _plan_audience(c: Cell, db: DbState) -> Item:
     attr = AUD_FIELDS[c.field]
     measured = db.aud_state.get(c.social_account_id, {}).get(attr)
     have = db.aud_curated.get(c.social_account_id, {}).get(attr)
-    if measured == c.final or have == c.final:
+    # curated_* = snapshot FINAL untuk seluruh cohort (bukan hanya fallback gap measurement):
+    # nilai final yang sama dengan measured tetap disalin ke curated_* yang masih NULL.
+    if have == c.final:
         return Item(c, "SKIP_SAME", "sudah ada di DB")
-    if c.method == "EXISTING" or measured is not None:
-        return Item(c, "INVALID", f"DB={measured}; nilai existing tidak ditimpa")
     if have is not None:
         return Item(c, "INVALID", f"label kurasi DB={have}; tidak ditimpa")
+    if measured is not None and measured != c.final:
+        return Item(c, "INVALID", f"DB={measured}; final berbeda dari measured")
+    if c.method == "EXISTING" and measured is None:
+        return Item(c, "INVALID", "workbook EXISTING tapi measured Unknown di DB")
     ok = {"gender": c.final in AUD_GENDERS, "age": c.final in AGE_BUCKETS,
           "country": isinstance(c.final, str) and len(c.final) == 2 and c.final.isalpha() and c.final.isupper(),
           "city": c.final in db.cities}[attr]

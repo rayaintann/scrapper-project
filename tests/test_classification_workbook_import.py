@@ -110,10 +110,25 @@ def test_update_audience_tidak_menyentuh_kolom_measurement():
     assert W.AUD_TABLE == {"instagram": "feature.ig_audience_analysis", "tiktok": "feature.tt_audience_analysis"}
 
 
-def test_audience_measured_tidak_ditimpa_label():
+def test_audience_measured_disalin_ke_curated_snapshot_final():
+    # curated_* = snapshot final seluruh cohort: measured == final dan curated NULL -> UPDATE
     d = db(aud_state={"s1": {"gender": None, "age": None, "country": "ID", "city": None, "interest": "x"}})
-    assert W.plan([cell("Audience Country", "ID", "EXISTING")], d)[0].status == "SKIP_SAME"
+    items = W.plan([cell("Audience Country", "ID", "EXISTING")], d)
+    assert items[0].status == "UPDATE"
+    assert W.aud_writes(items)[0]["country"] == "ID"
+    # final berbeda dari measured -> tidak ditulis
     assert W.plan([cell("Audience Country", "MY")], d)[0].status == "INVALID"
+
+
+def test_audience_curated_existing_tidak_ditimpa_nilai_berbeda():
+    d = db(aud_state={"s1": {"gender": "female", "age": None, "country": None, "city": None, "interest": "x"}},
+           aud_curated={"s1": {"gender": "female", "age": None, "country": "ID", "city": None}})
+    assert W.plan([cell("Audience Gender", "female", "EXISTING")], d)[0].status == "SKIP_SAME"
+    assert W.plan([cell("Audience Country", "MY")], d)[0].status == "INVALID"
+
+
+def test_audience_existing_tanpa_measured_invalid():
+    assert W.plan([cell("Audience Country", "ID", "EXISTING")], db())[0].status == "INVALID"
 
 
 def test_audience_taxonomy_dan_idempoten():
