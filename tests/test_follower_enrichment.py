@@ -146,6 +146,58 @@ def test_di_atas_plafon_ditolak():
     assert M.plafon_run(49, 0.05)[1] is None
 
 
+def test_scraper_asset_tanpa_retry_dan_dengan_batas_tagihan(monkeypatch):
+    """Satu eksekusi asset = satu kesempatan memanggil actor per batch."""
+    terima = {}
+
+    class ScraperTiruan:
+        def __init__(self, cfg, **kw):
+            terima.update(kw, cfg=cfg)
+
+    monkeypatch.setattr(M.E, "InstagramProfileScraper", ScraperTiruan)
+    M._buat_scraper(SimpleNamespace(apify="cfg-apify"), 0.1911)
+    assert terima == {"cfg": "cfg-apify", "actor_id": E.ACTOR_IG, "max_charge_usd": 0.1911,
+                      "max_retries": 0}
+    assert M.SCRAPER_MAX_RETRIES == 0
+
+
+def test_tanpa_retry_berarti_satu_panggilan_actor_per_batch(monkeypatch):
+    """Dengan `max_retries=0`, loop percobaan `ProfileScraper.scrape_batch` berjalan satu
+    kali walau run actor gagal -- actor asli diganti tiruan, tidak ada jaringan."""
+    import apify_runner
+
+    panggilan = []
+
+    class KlienTiruan:
+        def __init__(self, _token):
+            pass
+
+        def actor(self, _actor_id):
+            return self
+
+        def call(self, **kw):
+            panggilan.append(kw)
+            raise RuntimeError("run gagal")
+
+    monkeypatch.setattr(apify_runner, "ApifyClient", KlienTiruan)
+    from config import ApifyConfig
+    cfg = SimpleNamespace(apify=ApifyConfig(token="dummy", actor_id="x", include_about_section=False))
+    scraper = M._buat_scraper(cfg, 0.1911)
+    try:
+        scraper.scrape_batch(["a", "b"], batch_index=1)
+    except Exception:  # noqa: BLE001 - gagal total boleh melempar; yang diuji jumlah panggilan
+        pass
+    assert len(panggilan) == 1
+    assert str(panggilan[0]["max_total_charge_usd"]) == "0.1911"
+
+
+def test_cli_manual_tetap_memakai_retry_bawaan():
+    import inspect
+    import apify_runner
+    assert inspect.signature(apify_runner.ProfileScraper.__init__).parameters["max_retries"].default == 2
+    assert "max_retries" not in inspect.getsource(E.main)
+
+
 # =====================================================================
 # 5. Scope SQL: Instagram + Add KOL + run Add KOL itu sendiri
 # =====================================================================

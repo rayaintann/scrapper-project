@@ -50,7 +50,9 @@ SATU AKUN PER RUN, PLAFON PER AKUN
 Satu run memproses paling banyak `MAKS_AKUN_PER_RUN` akun (1). Estimasi dihitung
 atas username akun ITU, dibandingkan dengan plafon; di atas plafon -> tidak ada
 panggilan actor. Batas tagihan run actor = min(plafon, 1,5 x estimasi), jadi
-plafon $4,49 tidak menjadi cek kosong untuk target 50 profil.
+plafon $4,49 tidak menjadi cek kosong untuk target 50 profil. Scraper dibuat
+dengan `max_retries=0`: satu eksekusi asset hanya punya satu kesempatan memanggil
+actor per batch, sehingga batas tagihan run itu juga batas biaya eksekusinya.
 
 IDEMPOTEN, TANPA DELETE, TANPA PUTARAN
 ======================================
@@ -322,8 +324,17 @@ def baca_peta(cur, akun: Akun) -> tuple[dict[str, list[tuple]], int]:
 # ---------------------------------------------------------------------------
 # Eksekusi
 # ---------------------------------------------------------------------------
+#: Tanpa retry di dalam satu eksekusi: `scrape_batch` mengulang run actor sampai
+#: `max_retries` kali, dan TIAP run punya batas tagihannya sendiri. Dengan 0, satu
+#: eksekusi asset = paling banyak SATU run actor per batch, jadi batas tagihan run
+#: adalah batas biaya eksekusi itu. Percobaan ulang tetap ada, tapi lintas run dan
+#: tercatat (`MAKS_PERCOBAAN`). CLI `enrich_follower_profiles.py` tidak terpengaruh.
+SCRAPER_MAX_RETRIES = 0
+
+
 def _buat_scraper(cfg, batas_usd: float):
-    return E.InstagramProfileScraper(cfg.apify, actor_id=E.ACTOR_IG, max_charge_usd=batas_usd)
+    return E.InstagramProfileScraper(cfg.apify, actor_id=E.ACTOR_IG, max_charge_usd=batas_usd,
+                                     max_retries=SCRAPER_MAX_RETRIES)
 
 
 def _catat(cfg, run_id: str, akun: Akun, status: str, ditulis: int, pesan: str,
