@@ -159,8 +159,18 @@ CLASSIFICATION_ASSETS = (
     "creator_category_bridge",
 )
 
+#: Enrichment profil follower untuk KOL dari "Add New KOL" (BERBAYAR, default OFF --
+#: lihat `assets/follower_enrichment.py`). Duduk di antara `unified_follower` dan
+#: `audience_feature`. Sama seperti classification: hanya ada di
+#: `transform_chain_job`; `jalankan_transform_chain` tidak pernah menjalankannya,
+#: jadi one-shot scrape, e2e, dan one-pass enrichment tidak pernah memanggil Apify
+#: lewat jalur ini.
+ENRICHMENT_ASSETS = (
+    "follower_profile_enrichment",
+)
+
 #: Isi `transform_chain_job`.
-CHAIN_JOB_ASSETS = TRANSFORM_ASSETS + CLASSIFICATION_ASSETS
+CHAIN_JOB_ASSETS = TRANSFORM_ASSETS + ENRICHMENT_ASSETS + CLASSIFICATION_ASSETS
 
 
 # --- rantai transformasi (dipakai op Dagster DAN CLI) -----------------------
@@ -382,7 +392,9 @@ transform_chain_job = define_asset_job(
         "L0 Harmonization -> L1 Silver -> Feature -> L2 Gold memakai asset "
         "existing, lalu Category + Subcategory untuk KOL baru yang belum punya "
         "category (creator_classification -> creator_category_bridge). "
-        "Hanya SQL, tidak memanggil actor, aman diulang. Job ini "
+        "Hanya SQL dan aman diulang; satu-satunya asset yang BISA memanggil "
+        "actor adalah follower_profile_enrichment, dan itu OFF kecuali "
+        "FOLLOWER_ENRICHMENT_MODE diisi. Job ini "
         "berdiri sendiri: one_shot_scrape_job sudah menjalankan rantai yang "
         "sama secara otomatis, tapi job ini tetap ada untuk mengulang "
         "transformasi tanpa biaya."

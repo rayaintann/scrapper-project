@@ -839,7 +839,11 @@ def _tulis_gold(postgres: PostgresResource, tahun_acuan: int) -> Output:
 @asset(
     name="audience_feature",
     group_name=GROUP,
-    deps=[_FOLLOWER],
+    # `follower_profile_enrichment` hanya mengatur URUTAN di `transform_chain_job`
+    # (enrichment dulu, baru inferensi). Di rantai yang tidak memuat asset itu
+    # (`jalankan_transform_chain`) dependensinya diperlakukan Dagster sebagai asset
+    # eksternal dan tidak ditunggu.
+    deps=[_FOLLOWER, AssetKey("follower_profile_enrichment")],
     kinds={"postgres", "python"},
     description=(
         "feature.{ig,tt}_audience_analysis — ringkasan audiens per akun, "

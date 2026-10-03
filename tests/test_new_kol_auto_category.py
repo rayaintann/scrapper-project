@@ -76,7 +76,8 @@ def test_rantai_transform_lama_tidak_berubah():
     L0 -> L2: classification/bridge hanya ada di `transform_chain_job`."""
     from kol_orchestration import one_shot
     assert not set(one_shot.CLASSIFICATION_ASSETS) & set(one_shot.TRANSFORM_ASSETS)
-    assert one_shot.CHAIN_JOB_ASSETS == one_shot.TRANSFORM_ASSETS + one_shot.CLASSIFICATION_ASSETS
+    assert one_shot.CHAIN_JOB_ASSETS == (one_shot.TRANSFORM_ASSETS + one_shot.ENRICHMENT_ASSETS
+                                         + one_shot.CLASSIFICATION_ASSETS)
     assert {a.key.to_user_string() for a in one_shot._semua_asset()} == set(one_shot.TRANSFORM_ASSETS)
 
 

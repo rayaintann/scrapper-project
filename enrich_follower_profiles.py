@@ -74,7 +74,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -89,6 +88,11 @@ logger = logging.getLogger("enrich")
 
 ACTOR_IG = "apify/instagram-profile-scraper"
 
+#: Plafon biaya TOTAL bawaan satu eksekusi (USD). Dipakai CLI (`--cap-total`) dan
+#: asset Dagster `follower_profile_enrichment`; asset boleh menurunkannya, tidak
+#: pernah menaikkannya.
+CAP_TOTAL_DEFAULT = 4.49
+
 SQL_TARGET = """
     SELECT f.username, f.social_account_id, f.follower_platform_id, f.date
     FROM l1_silver.unified_follower f
@@ -100,12 +104,10 @@ SQL_TARGET = """
 
 
 def _conn():
-    from dotenv import load_dotenv
-    load_dotenv()
-    return psycopg2.connect(
-        host=os.environ["PG_HOST"], port=os.getenv("PG_PORT", "5432"),
-        dbname=os.environ["PG_DB"], user=os.environ["PG_USER"],
-        password=os.environ["PG_PASSWORD"], connect_timeout=15)
+    """Koneksi DB `kol` lewat `config.load_config()` -- sumber konfigurasi yang sama
+    dengan pipeline lain, jadi `PG_*` maupun `PG_*_KOL` di .env terbaca tanpa
+    menduplikasi kredensial di sini."""
+    return psycopg2.connect(connect_timeout=15, **load_config().postgres.as_connect_kwargs())
 
 
 def parse_args(argv=None):
@@ -113,7 +115,7 @@ def parse_args(argv=None):
     p.add_argument("--platform", choices=["instagram"], default="instagram",
                    help="TikTok belum termasuk; jalur dan actor-nya berbeda.")
     p.add_argument("--batch-size", type=int, default=100)
-    p.add_argument("--cap-total", type=float, default=4.49,
+    p.add_argument("--cap-total", type=float, default=CAP_TOTAL_DEFAULT,
                    help="Plafon biaya TOTAL yang disetujui, USD. Plafon per batch "
                         "diturunkan dari sini, bukan sebaliknya (default 4.49).")
     p.add_argument("--akun-file", default=None, metavar="FILE",
@@ -179,9 +181,20 @@ def _scraped_at(tgl, asli: datetime | None = None) -> datetime:
     return max(siang, min(asli + timedelta(seconds=1), akhir_hari))
 
 
+def _hasil_kosong() -> dict:
+    return {"berhasil_user": 0, "gagal_user": [], "id_beda": [], "err_item": 0,
+            "ditulis": 0, "dihapus": 0}
+
+
 def _tulis_batch(conn, run_id: str, items: dict, peta: dict, sekarang: datetime,
-                 hasil: dict) -> None:
+                 hasil: dict, ganti: bool = True) -> None:
     """Tulis satu batch lalu COMMIT. Batch berikutnya gagal pun, yang ini tetap.
+
+    `ganti=True` (CLI, perilaku lama): rerun MENGGANTI baris enrichment pasangan
+    (akun, follower, tanggal) yang sama. `ganti=False` (asset Dagster untuk Add
+    KOL): TIDAK ADA DELETE sama sekali -- targetnya hanya follower yang belum
+    pernah diperkaya, jadi tidak ada yang perlu diganti dan enrichment yang
+    sudah ada tidak pernah dihapus.
 
     Angkanya dikumpulkan LOKAL dan baru digabung ke `hasil` sesudah COMMIT
     berhasil. Kalau ditambahkan langsung, batch yang di-rollback caller tetap
@@ -206,14 +219,15 @@ def _tulis_batch(conn, run_id: str, items: dict, peta: dict, sekarang: datetime,
                 if m["follower_id"] and m["follower_id"] != pid:
                     lokal["id_beda"].append((uname, pid, m["follower_id"]))
                 scraped_at = _scraped_at(tgl, asli)
-                # Rerun MENGGANTI enrichment pasangan ini saja; baris dari actor
-                # follower-list (source_actor beda) tidak tersentuh.
-                cur.execute("""DELETE FROM l0_raw.ig_followers_apify
-                               WHERE source_actor = %s AND social_account_id = %s
-                                 AND followers_ig_id = %s
-                                 AND (scraped_at AT TIME ZONE 'UTC')::date = %s""",
-                            (ACTOR_IG, sid, pid, scraped_at.date()))
-                lokal["dihapus"] += cur.rowcount or 0
+                if ganti:
+                    # Rerun MENGGANTI enrichment pasangan ini saja; baris dari actor
+                    # follower-list (source_actor beda) tidak tersentuh.
+                    cur.execute("""DELETE FROM l0_raw.ig_followers_apify
+                                   WHERE source_actor = %s AND social_account_id = %s
+                                     AND followers_ig_id = %s
+                                     AND (scraped_at AT TIME ZONE 'UTC')::date = %s""",
+                                (ACTOR_IG, sid, pid, scraped_at.date()))
+                    lokal["dihapus"] += cur.rowcount or 0
                 cur.execute("""
                     INSERT INTO l0_raw.ig_followers_apify (
                         social_account_id, scrape_run_id, followers_ig_id, username,
@@ -237,6 +251,44 @@ def _tulis_batch(conn, run_id: str, items: dict, peta: dict, sekarang: datetime,
             hasil[k].extend(v)
         else:
             hasil[k] += v
+
+
+def _jalankan_batch(scraper, conn, chunks, peta: dict, run_id: str, sekarang: datetime,
+                    hasil: dict, ganti: bool = True) -> tuple[float, int]:
+    """Panggil actor per batch, tulis & COMMIT per batch.
+
+    Proses yang terhenti di tengah tidak membuang profil yang sudah dibayar, dan
+    memori tidak menampung seluruh hasil. Kegagalan satu batch tidak menghentikan
+    batch berikutnya. Mengembalikan (biaya aktual USD, jumlah batch gagal)."""
+    total_biaya = 0.0
+    gagal_batch = 0
+    for i, chunk in enumerate(chunks, 1):
+        try:
+            b = scraper.scrape_batch(chunk, batch_index=i)
+        except Exception as exc:  # noqa: BLE001
+            gagal_batch += 1
+            logger.error("Batch %d gagal: %s", i, exc)
+            hasil["gagal_user"].extend(chunk)
+            continue
+        if b.cost_usd:
+            total_biaya += b.cost_usd
+        items: dict[str, dict] = {}
+        for it in b.items:
+            u = (it.get("username") or "").strip()
+            if u in peta:
+                items[u] = it
+        hasil["gagal_user"].extend(u for u in chunk if u not in items)
+        try:
+            _tulis_batch(conn, run_id, items, peta, sekarang, hasil, ganti)
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            gagal_batch += 1
+            logger.error("Batch %d gagal ditulis: %s", i, exc)
+            continue
+        logger.info("Batch %d/%d: %d profil, biaya $%.4f (kumulatif $%.4f), baris ditulis %d",
+                    i, len(chunks), len(items), b.cost_usd or 0.0, total_biaya,
+                    hasil["ditulis"])
+    return total_biaya, gagal_batch
 
 
 def main(argv=None) -> int:
@@ -318,8 +370,7 @@ def main(argv=None) -> int:
             u = (dict(it).get("username") or "").strip()
             if u in peta:
                 items[u] = dict(it)
-        hasil = {"berhasil_user": 0, "gagal_user": [], "id_beda": [], "err_item": 0,
-                 "ditulis": 0, "dihapus": 0}
+        hasil = _hasil_kosong()
         _tulis_batch(conn, str(uuid.uuid4()), items, peta, datetime.now(timezone.utc), hasil)
         conn.close()
         print(f"PEMULIHAN run {args.dari_run}: {len(items)} profil cocok target, "
@@ -366,40 +417,9 @@ def main(argv=None) -> int:
               f"{akan_dijalankan} profil, estimasi ${biaya_dijalankan:.2f}")
     print()
 
-    hasil = {"berhasil_user": 0, "gagal_user": [], "id_beda": [], "err_item": 0,
-             "ditulis": 0, "dihapus": 0}
-    total_biaya = 0.0
-    gagal_batch = 0
+    hasil = _hasil_kosong()
     sekarang = datetime.now(timezone.utc)
-
-    # Tulis & COMMIT per batch: proses yang terhenti di tengah tidak membuang
-    # profil yang sudah dibayar, dan memori tidak menampung seluruh hasil.
-    for i, chunk in enumerate(chunks, 1):
-        try:
-            b = scraper.scrape_batch(chunk, batch_index=i)
-        except Exception as exc:  # noqa: BLE001
-            gagal_batch += 1
-            logger.error("Batch %d gagal: %s", i, exc)
-            hasil["gagal_user"].extend(chunk)
-            continue
-        if b.cost_usd:
-            total_biaya += b.cost_usd
-        items: dict[str, dict] = {}
-        for it in b.items:
-            u = (it.get("username") or "").strip()
-            if u in peta:
-                items[u] = it
-        hasil["gagal_user"].extend(u for u in chunk if u not in items)
-        try:
-            _tulis_batch(conn, run_id, items, peta, sekarang, hasil)
-        except Exception as exc:  # noqa: BLE001
-            conn.rollback()
-            gagal_batch += 1
-            logger.error("Batch %d gagal ditulis: %s", i, exc)
-            continue
-        logger.info("Batch %d/%d: %d profil, biaya $%.4f (kumulatif $%.4f), baris ditulis %d",
-                    i, len(chunks), len(items), b.cost_usd or 0.0, total_biaya,
-                    hasil["ditulis"])
+    total_biaya, gagal_batch = _jalankan_batch(scraper, conn, chunks, peta, run_id, sekarang, hasil)
     conn.close()
 
     print("\n" + "=" * 74)

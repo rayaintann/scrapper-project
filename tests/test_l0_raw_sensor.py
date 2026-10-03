@@ -435,8 +435,8 @@ class RantaiSampaiL2(unittest.TestCase):
         from dagster import Output
         from kol_orchestration.assets import (
             audience, creator_age, creator_classification, creator_gender,
-            feature_engagement, feature_post, followers, gold, gold_post,
-            gold_profile, harmonization, silver,
+            feature_engagement, feature_post, follower_enrichment, followers,
+            gold, gold_post, gold_profile, harmonization, silver,
         )
         from kol_orchestration.repository import defs
 
@@ -468,6 +468,8 @@ class RantaiSampaiL2(unittest.TestCase):
             # Category + Subcategory KOL baru, lalu bridge ke category_id/category_ids.
             (creator_classification, "_jalankan_klasifikasi"),
             (creator_classification, "_jalankan_bridge"),
+            # Enrichment follower Add KOL (default OFF); di-stub supaya tes tetap offline.
+            (follower_enrichment, "_jalankan"),
         )
 
         with warnings.catch_warnings():

@@ -97,6 +97,7 @@ from kol_orchestration.assets.audience import audience_assets
 from kol_orchestration.assets.creator_age import creator_age_assets
 from kol_orchestration.assets.creator_gender import creator_gender_assets
 from kol_orchestration.assets.creator_classification import creator_classification_assets
+from kol_orchestration.assets.follower_enrichment import follower_enrichment_assets
 from kol_orchestration.one_shot import one_shot_jobs, one_shot_schedules
 from kol_orchestration.sensors import l0_raw_sensors
 from kol_orchestration.brand_match import brand_match_jobs, brand_match_sensors
@@ -158,6 +159,7 @@ defs = Definitions(
         *creator_age_assets,         # l2_gold: umur KREATOR di kartu profil (bukan audiens)
         *creator_gender_assets,      # l2_gold: gender KREATOR di kartu profil (bukan audiens)
         *creator_classification_assets,  # kol_directory: category + subcategory KOL baru (+ bridge)
+        *follower_enrichment_assets,     # l0_raw: detail profil follower KOL dari Add KOL (default OFF)
     ],
     # + brand_match_job: Brand Match di background (lihat brand_match.py).
     jobs=[*one_shot_jobs, *brand_match_jobs],
