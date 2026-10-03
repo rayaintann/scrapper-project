@@ -326,3 +326,127 @@ def test_writer_melewati_baris_category_curated(tax, attr_ids):
 
 def test_sql_update_writer_menjaga_baris_curated():
     assert "inferred_category_source IS DISTINCT FROM 'curated'" in W.SQL_KD_UPDATE
+
+
+# --- guard roster dinamis: jumlah aktif bukan konstanta ------------------------------
+def test_guard_tidak_lagi_bergantung_angka_1980():
+    assert W.EXPECT_ACTIVE is None
+    for n in (100, 105, 1980, 7):
+        assert W.guards(snap(active=n), snap(active=n), 5, 5, 0) == []
+
+
+def test_guard_gagal_kalau_jumlah_aktif_berubah_selama_transaksi():
+    bad = W.guards(snap(active=105), snap(active=104), 5, 5, 0)
+    assert any("active KOL berubah" in x for x in bad)
+
+
+def test_expect_active_tetap_didukung():
+    assert W.guards(snap(active=105), snap(active=105), 5, 5, 0, expect_active=105) == []
+    bad = W.guards(snap(active=105), snap(active=105), 5, 5, 0, expect_active=1980)
+    assert any("expected 1980" in x for x in bad)
+
+
+def test_apply_meneruskan_expect_active(tax, attr_ids):
+    conn, p = FakeConn(), _plan(tax, attr_ids)
+    _d, problems, committed = W.apply(conn, _empty_replan, p, commit=True, snap=lambda _c: snap(active=105),
+                                      expect_active=1980)
+    assert problems and not committed and (conn.committed, conn.rolled_back) == (0, 1)
+    conn = FakeConn()
+    _d, problems, committed = W.apply(conn, _empty_replan, p, commit=True, snap=lambda _c: snap(active=105),
+                                      expect_active=105)
+    assert problems == [] and committed
+
+
+# --- mode additive (--only-unclassified): KOL baru, hanya mengisi yang kosong -------------
+def add_plan(tax, attr_ids, r, state=None):
+    state = state or W.State({}, {})
+    return W.plan(tax, [(KOL, SA, r, {"gender": None, "age": None}, AUD_IN, A.classify(AUD_IN))],
+                  state, attr_ids, MODE, additive=True)
+
+
+def test_additive_kol_baru_dapat_category_dan_subcategory(tax, attr_ids):
+    p = add_plan(tax, attr_ids, res(tax, cat="FOD", sub="FOD.CUL", style=STYLE))
+    (kid, want), = p.kd_updates
+    assert kid == KOL
+    assert want["inferred_category_id"] == tax.by_code["FOD"].id
+    assert want["inferred_subcategory_id"] == tax.by_code["FOD.CUL"].id
+    assert [w["key"] for w in p.map_inserts] == [STYLE]
+    assert p.map_deletes == [] and p.map_updates == []
+
+
+def test_additive_unknown_tidak_menulis_dan_tidak_mengosongkan(tax, attr_ids):
+    p = add_plan(tax, attr_ids, res(tax))
+    assert p.n_changes == 0 and not p.cleared
+
+
+def test_additive_category_kurasi_terisi_dilewati(tax, attr_ids):
+    state = W.State({}, {}, frozenset({KOL}))                 # category_id/category_ids terisi
+    p = add_plan(tax, attr_ids, res(tax, cat="FOD", sub="FOD.CUL", style=STYLE), state)
+    assert p.n_changes == 0 and p.skipped_existing["creator_category"] == 1
+
+
+@pytest.mark.parametrize("source", [W.CURATED_SOURCE, W.CREATOR_SOURCE])
+def test_additive_inferred_existing_tidak_ditimpa_atau_dikosongkan(tax, attr_ids, source):
+    have = {"inferred_category_id": tax.by_code["BEA"].id, "inferred_subcategory_id": tax.by_code["BEA.MKP"].id,
+            "inferred_category_source": source, "inferred_category_confidence": "medium",
+            "inferred_subcategory_confidence": "medium", "inferred_category_evidence": {}}
+    for r in (res(tax, cat="FOD", sub="FOD.CUL"), res(tax)):   # hasil beda, lalu Unknown
+        p = add_plan(tax, attr_ids, r, W.State({KOL: have}, {}))
+        assert p.n_changes == 0
+
+
+def test_additive_tidak_pernah_delete_atau_update_map(tax, attr_ids):
+    state = W.State({}, {KOL: [{"id": "o1", "kind": "style", "key": "content_style.tutorial",
+                                "source": W.CREATOR_SOURCE, "confidence": "low", "evidence": {}}]})
+    p = add_plan(tax, attr_ids, res(tax, cat="FOD", style=STYLE, pers=PERS), state)
+    assert p.map_deletes == [] and p.map_updates == []
+    assert [w["kind"] for w in p.map_inserts] == ["personality"]     # style sudah ada -> dilewati
+    assert p.skipped_existing["creator_style"] == 1
+
+
+def test_additive_konvergen_run_kedua_nol_perubahan(tax, attr_ids):
+    r = res(tax, cat="FOD", sub="FOD.CUL", style=STYLE, pers=PERS)
+    p = add_plan(tax, attr_ids, r)
+    state = W.State({kid: want for kid, want in p.kd_updates}, {})
+    assert add_plan(tax, attr_ids, r, state).n_changes == 0
+
+
+def test_mode_penuh_tidak_berubah_oleh_flag_additive(tax, attr_ids):
+    """Default (additive=False) tetap perilaku lama: Unknown membersihkan baris classifier."""
+    have = {"inferred_category_id": tax.by_code["BEA"].id, "inferred_subcategory_id": None,
+            "inferred_category_source": W.CREATOR_SOURCE, "inferred_category_confidence": "medium",
+            "inferred_subcategory_confidence": None, "inferred_category_evidence": {}}
+    p = run_plan(tax, attr_ids, res(tax), state=W.State({KOL: have}, {}))
+    assert p.cleared["creator_category"] == 1
+
+
+def test_sql_unclassified_hanya_aktif_tanpa_category_apa_pun():
+    q = " ".join(W.SQL_UNCLASSIFIED.split())
+    for frag in ("directory_status = 'active'", "category_id IS NULL",
+                 "coalesce(cardinality(category_ids), 0) = 0", "inferred_category_id IS NULL"):
+        assert frag in q, frag
+
+
+def test_load_inputs_kol_ids_membatasi_data_yang_sudah_dimuat(tax):
+    kols = [("k1", "a", "instagram", "s1", None), ("k2", "b", "instagram", "s2", None)]
+    data = (tax, kols, {}, {}, {}, {}, {})
+
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *_a):
+            pass
+
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+    _t, rows, results, _ids = W.load_inputs(Conn(), True, 2026, data=data, audience_in={}, kol_ids=["k2"])
+    assert [r[0][0] for r in rows] == ["k2"] and [r[0] for r in results] == ["k2"]

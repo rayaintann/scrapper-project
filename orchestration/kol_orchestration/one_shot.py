@@ -147,6 +147,21 @@ TRANSFORM_ASSETS = (
     "creator_gender",
 )
 
+#: Category + Subcategory untuk KOL BARU, dijalankan SETELAH rantai transformasi di
+#: atas (urutannya dari `deps`: unified_post + kol_profile_card -> classification ->
+#: bridge). Sengaja daftar terpisah dari `TRANSFORM_ASSETS`: `jalankan_transform_chain`
+#: (dipakai one_shot_scrape_job, run_e2e_once, dan one-pass enrichment yang menjaga
+#: sidik jari kolom kurasi) tetap murni L0 -> L2 dan tidak berubah perilaku. Hanya
+#: `transform_chain_job` -- job yang dipicu `l0_raw_new_data_sensor` -- yang
+#: menjalankan keduanya.
+CLASSIFICATION_ASSETS = (
+    "creator_classification",
+    "creator_category_bridge",
+)
+
+#: Isi `transform_chain_job`.
+CHAIN_JOB_ASSETS = TRANSFORM_ASSETS + CLASSIFICATION_ASSETS
+
 
 # --- rantai transformasi (dipakai op Dagster DAN CLI) -----------------------
 
@@ -362,10 +377,12 @@ def one_shot_scrape_job() -> None:
 
 transform_chain_job = define_asset_job(
     name=TRANSFORM_JOB_NAME,
-    selection=AssetSelection.assets(*[AssetKey(n) for n in TRANSFORM_ASSETS]),
+    selection=AssetSelection.assets(*[AssetKey(n) for n in CHAIN_JOB_ASSETS]),
     description=(
         "L0 Harmonization -> L1 Silver -> Feature -> L2 Gold memakai asset "
-        "existing. Hanya SQL, tidak memanggil actor, aman diulang. Job ini "
+        "existing, lalu Category + Subcategory untuk KOL baru yang belum punya "
+        "category (creator_classification -> creator_category_bridge). "
+        "Hanya SQL, tidak memanggil actor, aman diulang. Job ini "
         "berdiri sendiri: one_shot_scrape_job sudah menjalankan rantai yang "
         "sama secara otomatis, tapi job ini tetap ada untuk mengulang "
         "transformasi tanpa biaya."

@@ -434,9 +434,9 @@ class RantaiSampaiL2(unittest.TestCase):
 
         from dagster import Output
         from kol_orchestration.assets import (
-            audience, creator_age, creator_gender, feature_engagement,
-            feature_post, followers, gold, gold_post, gold_profile,
-            harmonization, silver,
+            audience, creator_age, creator_classification, creator_gender,
+            feature_engagement, feature_post, followers, gold, gold_post,
+            gold_profile, harmonization, silver,
         )
         from kol_orchestration.repository import defs
 
@@ -465,6 +465,9 @@ class RantaiSampaiL2(unittest.TestCase):
             (creator_age, "_jalankan"),
             # Gender KREATOR, migration 051. Bukan fitur audiens.
             (creator_gender, "_jalankan"),
+            # Category + Subcategory KOL baru, lalu bridge ke category_id/category_ids.
+            (creator_classification, "_jalankan_klasifikasi"),
+            (creator_classification, "_jalankan_bridge"),
         )
 
         with warnings.catch_warnings():
@@ -487,7 +490,7 @@ class RantaiSampaiL2(unittest.TestCase):
             ev.event_specific_data.materialization.asset_key.to_user_string()
             for ev in hasil.get_asset_materialization_events()
         ]
-        self.assertEqual(sorted(dijalankan), sorted(one_shot.TRANSFORM_ASSETS))
+        self.assertEqual(sorted(dijalankan), sorted(one_shot.CHAIN_JOB_ASSETS))
         # Ujung rantai memang L2 Gold, bukan berhenti di Feature.
         for l2 in ("kol_profile_card", "kol_metric_daily", "kol_metric_monthly"):
             self.assertIn(l2, dijalankan)
@@ -503,6 +506,14 @@ class RantaiSampaiL2(unittest.TestCase):
         self.assertIn("audience_geo_measured", dijalankan)
         self.assertIn("creator_age", dijalankan)
         self.assertIn("creator_gender", dijalankan)
+        # KOL baru: classification lalu bridge, di job yang sama dengan transform.
+        self.assertIn("creator_classification", dijalankan)
+        self.assertIn("creator_category_bridge", dijalankan)
+        self.assertLess(dijalankan.index("creator_classification"),
+                        dijalankan.index("creator_category_bridge"))
+        for hulu in ("unified_post", "unified_profile", "kol_profile_card"):
+            self.assertLess(dijalankan.index(hulu),
+                            dijalankan.index("creator_classification"), hulu)
 
     def test_urutan_eksekusi_l0_ke_l2_dijaga_dagster(self):
         """Urutan datang dari `deps` di job hasil resolve, bukan urutan daftar."""

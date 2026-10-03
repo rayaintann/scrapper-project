@@ -57,10 +57,19 @@ SQL_TAXONOMY_CATEGORIES = """
     SELECT id, name, code, level, parent_id FROM public.kol_categories"""
 SQL_TAXONOMY_ATTRIBUTES = "SELECT kind, attribute_key FROM public.kol_attribute WHERE is_active"
 
-SQL_KOL = """
+#: category_id/category_ids yang diisi `creator_category_bridge` (salinan hasil
+#: classifier untuk KOL baru) BUKAN kurasi roster. Tanpa saringan ini hasil inference
+#: akan dibaca balik sebagai "roster (kurasi), high" pada run berikutnya. Dikenali
+#: tanpa kolom baru: kurasi == persis inferred milik classifier, dan basis inference
+#: itu sendiri bukan roster.
+SQL_BRIDGED = """(kd.inferred_category_source = 'creator_classification'
+                  AND kd.category_ids = ARRAY[kd.inferred_category_id]
+                  AND left(coalesce(kd.inferred_category_evidence -> 'category' ->> 'basis', ''), 6) <> 'roster')"""
+SQL_KOL = f"""
     SELECT kd.id::text, kd.username, pl.key, s.social_account_id::text,
            (SELECT array_agg(kc.name ORDER BY kc.name) FROM public.kol_categories kc
-             WHERE kc.id = ANY (COALESCE(kd.category_ids, ARRAY[kd.category_id])))
+             WHERE kc.id = ANY (COALESCE(kd.category_ids, ARRAY[kd.category_id]))
+               AND NOT {SQL_BRIDGED})
       FROM public.kol_directory kd
       JOIN public.platforms pl ON pl.id = kd.platform_id
       JOIN public.kol_social_account s ON s.kol_id = kd.id
@@ -134,25 +143,41 @@ def merge_latest_posts(snapshots) -> list[dict]:
     return out
 
 
-def load(conn):
+def _scoped(sql: str, col: str) -> str:
+    """Query yang sama, dibatasi ke `col = ANY(%s)` (kolom pertama tiap query)."""
+    return f"SELECT * FROM ({sql}) q WHERE q.{col} = ANY(%s::text[])"
+
+
+def load(conn, kol_ids=None):
+    """Taxonomy + bukti classifier. `kol_ids` (opsional) membatasi SEMUA bukti ke
+    KOL itu saja -- dipakai jalur KOL baru supaya tidak membaca seluruh directory."""
     with conn.cursor() as cur:
+        if kol_ids is None:
+            run = lambda sql, _col, _ids: cur.execute(sql)  # noqa: E731
+            kid_ids = sa_ids = None
+        else:
+            run = lambda sql, col, ids: cur.execute(_scoped(sql, col), (ids,))  # noqa: E731
+            kid_ids = sorted({str(k) for k in kol_ids})
         cur.execute(SQL_TAXONOMY_CATEGORIES); cats = cur.fetchall()
         cur.execute(SQL_TAXONOMY_ATTRIBUTES); attrs = cur.fetchall()
-        cur.execute(SQL_KOL); kols = cur.fetchall()
-        cur.execute(SQL_PROFILE); prof = {r[0]: r[1:] for r in cur.fetchall()}
-        cur.execute(SQL_POSTS)
+        run(SQL_KOL, "id", kid_ids); kols = cur.fetchall()
+        if kol_ids is not None:
+            kols.sort(key=lambda r: r[0])
+            sa_ids = sorted({k[3] for k in kols})
+        run(SQL_PROFILE, "social_account_id", sa_ids); prof = {r[0]: r[1:] for r in cur.fetchall()}
+        run(SQL_POSTS, "social_account_id", sa_ids)
         posts = defaultdict(list)
         for sa, cid, cap, tags, mt, dur in cur.fetchall():
             posts[sa].append((str(cid), C.Post(cap, tuple(tags or ()), mt,
                                                float(dur) if dur is not None else None)))
-        cur.execute(SQL_ROSTER); roster = {r[0]: r[1:] for r in cur.fetchall()}
-        cur.execute(SQL_ROSTER_SIBLING)
+        run(SQL_ROSTER, "kol_directory_id", kid_ids); roster = {r[0]: r[1:] for r in cur.fetchall()}
+        run(SQL_ROSTER_SIBLING, "kol_directory_id", kid_ids)
         for kid, sib_cats in cur.fetchall():
             g, nik, nm = (tuple(roster.get(kid, ())) + (None, None, None))[:3]
             roster[kid] = (g, nik, nm, tuple(sib_cats or ()))
-        cur.execute(SQL_CARD); card = {r[0]: r[1:] for r in cur.fetchall()}
-        cur.execute(SQL_PROTO); proto = {r[0]: r[1:] for r in cur.fetchall()}
-        cur.execute(SQL_PROTO_POSTS)
+        run(SQL_CARD, "social_account_id", sa_ids); card = {r[0]: r[1:] for r in cur.fetchall()}
+        run(SQL_PROTO, "social_account_id", sa_ids); proto = {r[0]: r[1:] for r in cur.fetchall()}
+        run(SQL_PROTO_POSTS, "social_account_id", sa_ids)
         history = defaultdict(list)
         for sa, lp in cur.fetchall():
             history[sa].append(lp)

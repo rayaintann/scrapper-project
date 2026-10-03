@@ -6,6 +6,18 @@ verifikasi Audience Classification terhadap Audience Analysis existing.
     python creator_classification_writer.py --commit      # WRITE -> GUARD -> COMMIT (ROLLBACK kalau guard gagal)
     python creator_classification_writer.py --verify      # verifikasi read-only
 
+Cakupan (boleh digabung dengan --dry-run / --rehearse / --commit):
+
+    --only-unclassified   hanya KOL aktif yang BELUM punya category sama sekali
+                          (category_id, category_ids, inferred_category_id kosong).
+                          Mode ADDITIVE: hanya mengisi yang kosong -- tidak pernah
+                          menimpa, mengosongkan, atau menghapus baris yang sudah ada.
+                          Dipakai asset Dagster `creator_classification` untuk KOL
+                          baru dari "Add New KOL".
+    --kol-id UUID         batasi ke KOL tertentu (boleh diulang).
+    --expect-active N     guard tambahan: jumlah KOL aktif harus persis N. Tanpa
+                          flag ini guard-nya dinamis: jumlah aktif sebelum == sesudah.
+
 Storage per output (tidak ada tabel baru; taxonomy hanya DIBACA):
 
     CREATOR
@@ -60,7 +72,10 @@ from config import load_config
 CREATOR_SOURCE = "creator_classification"
 #: Baris kurasi (kol_attribute_map default 045, kol_directory.inferred_* sejak 054): tidak pernah ditimpa.
 CURATED_SOURCE = "curated"
-EXPECT_ACTIVE = 1980
+#: Jumlah KOL aktif BUKAN konstanta (Add New KOL / lifecycle mengubahnya). None =
+#: guard dinamis: jumlah aktif tidak boleh berubah selama transaksi writer.
+#: Angka pasti hanya diperiksa kalau pemanggil memberikannya (`--expect-active`).
+EXPECT_ACTIVE: int | None = None
 MAP_KINDS = ("style", "personality")
 CARD_CREATOR = ("gender", "age")
 EVIDENCE_MODES = {"l1": False, "l1+l0raw": True}
@@ -134,6 +149,8 @@ def _differs(want: dict, have: dict) -> bool:
 class State:
     kd: dict[str, dict]                     # kol_id -> kolom inferred_* sekarang
     map: dict[str, list[dict]]              # kol_id -> [{id, kind, key, source, confidence, evidence}]
+    #: kol_id yang category_id / category_ids kurasinya sudah terisi (mode additive melewatinya).
+    has_category: frozenset = frozenset()
 
 
 @dataclass
@@ -145,6 +162,7 @@ class Plan:
     classified: Counter = field(default_factory=Counter)
     unknown: Counter = field(default_factory=Counter)
     skipped_curated: Counter = field(default_factory=Counter)
+    skipped_existing: Counter = field(default_factory=Counter)
     unchanged: Counter = field(default_factory=Counter)
     cleared: Counter = field(default_factory=Counter)
     verified: Counter = field(default_factory=Counter)
@@ -157,8 +175,19 @@ class Plan:
                 + len(self.map_updates) + len(self.map_deletes))
 
 
-def plan(tax: C.Taxonomy, results, state: State, attr_ids: dict, mode: str) -> Plan:
-    """results: iterable (kol_id, social_account_id, res_creator, card_creator, audience_input, res_audience)."""
+def is_unclassified(state: State, kid: str) -> bool:
+    """Belum punya category sama sekali: kurasi (category_id/category_ids) kosong DAN
+    inferred_category_id kosong."""
+    return kid not in state.has_category and state.kd.get(kid, {}).get("inferred_category_id") is None
+
+
+def plan(tax: C.Taxonomy, results, state: State, attr_ids: dict, mode: str, *,
+         additive: bool = False) -> Plan:
+    """results: iterable (kol_id, social_account_id, res_creator, card_creator, audience_input, res_audience).
+
+    `additive=True` (KOL baru / `--only-unclassified`): hanya MENGISI yang kosong.
+    KOL yang sudah punya category (kurasi atau inferred) dilewati utuh; hasil Unknown
+    tidak menulis apa pun; tidak ada UPDATE/DELETE atas baris kol_attribute_map."""
     p = Plan()
     for kid, sa, res, card, ainp, aud in results:
         for a in D.ATTRS:
@@ -181,6 +210,10 @@ def plan(tax: C.Taxonomy, results, state: State, attr_ids: dict, mode: str) -> P
         # Audience: dibaca dari Audience Analysis existing, tidak ditulis.
         for a in A.AUDIENCE_ATTRS:
             p.verified["audience_" + a] += aud[a].known
+
+        if additive:
+            _plan_additive(p, tax, kid, res, state, attr_ids, mode)
+            continue
 
         # Creator category/subcategory -> kol_directory.inferred_*
         want = desired_kd(tax, res, mode)
@@ -222,6 +255,21 @@ def plan(tax: C.Taxonomy, results, state: State, attr_ids: dict, mode: str) -> P
     return p
 
 
+def _plan_additive(p: Plan, tax, kid, res, state: State, attr_ids, mode) -> None:
+    if not is_unclassified(state, kid):
+        p.skipped_existing["creator_category"] += 1
+        return
+    want = desired_kd(tax, res, mode)
+    if want["inferred_category_id"] is not None:
+        p.kd_updates.append((kid, want))
+    rows = state.map.get(kid, [])
+    for kind, w in desired_map(tax, res, attr_ids, mode).items():
+        if any(r["kind"] == kind for r in rows):
+            p.skipped_existing["creator_" + kind] += 1
+        else:
+            p.map_inserts.append({"kol_directory_id": kid, "kind": kind, **w})
+
+
 # ---------------------------------------------------------------------------
 # DB: baca state
 # ---------------------------------------------------------------------------
@@ -230,6 +278,15 @@ SQL_STATE_KD = f"SELECT id::text, {', '.join(KD_COLS)} FROM public.kol_directory
 SQL_STATE_MAP = """
     SELECT m.id::text, m.kol_directory_id::text, a.kind, a.attribute_key, m.source, m.confidence, m.evidence
       FROM public.kol_attribute_map m JOIN public.kol_attribute a ON a.id = m.kol_attribute_id"""
+SQL_STATE_HAS_CATEGORY = """
+    SELECT id::text FROM public.kol_directory
+     WHERE category_id IS NOT NULL OR coalesce(cardinality(category_ids), 0) > 0"""
+#: Target `--only-unclassified`: KOL AKTIF tanpa category kurasi maupun inferred.
+SQL_UNCLASSIFIED = """
+    SELECT id::text FROM public.kol_directory
+     WHERE directory_status = 'active' AND category_id IS NULL
+       AND coalesce(cardinality(category_ids), 0) = 0 AND inferred_category_id IS NULL
+     ORDER BY id"""
 
 
 def read_state(cur) -> State:
@@ -244,16 +301,27 @@ def read_state(cur) -> State:
     for mid, kid, kind, key, src, conf, ev in cur.fetchall():
         mp.setdefault(kid, []).append({"id": mid, "kind": kind, "key": key, "source": src,
                                        "confidence": conf, "evidence": ev})
-    return State(kd, mp)
+    cur.execute(SQL_STATE_HAS_CATEGORY)
+    return State(kd, mp, frozenset(r[0] for r in cur.fetchall()))
 
 
-def load_inputs(conn, prototype: bool, tahun: int, data=None, audience_in=None):
+def unclassified_ids(cur) -> list[str]:
+    cur.execute(SQL_UNCLASSIFIED)
+    return [r[0] for r in cur.fetchall()]
+
+
+def load_inputs(conn, prototype: bool, tahun: int, data=None, audience_in=None, kol_ids=None):
     """Classifier creator + audience untuk semua KOL aktif (read-only).
 
     `data` (hasil `D.load`) dan `audience_in` (hasil `A.load`) boleh diberikan
-    dari luar supaya evidence yang sudah dibaca sekali tidak di-query ulang."""
+    dari luar supaya evidence yang sudah dibaca sekali tidak di-query ulang.
+    `kol_ids` membatasi ke KOL tertentu (evidence hanya dibaca untuk KOL itu)."""
     if data is None:
-        data = D.load(conn)
+        data = D.load(conn) if kol_ids is None else D.load(conn, kol_ids=kol_ids)
+    elif kol_ids is not None:
+        want = {str(k) for k in kol_ids}
+        tax, kols, *rest = data
+        data = (tax, [k for k in kols if str(k[0]) in want], *rest)
     tax, rows, _viol = D.run(prototype, data, tahun)
     if audience_in is None:
         audience_in = A.load(conn)
@@ -327,8 +395,15 @@ SQL_COUNTS = {
 }
 
 
-def snapshot(cur) -> dict:
-    snap = {t: _fp(cur, t) for t in FULL_FP}
+#: Tabel yang BISA disentuh writer + taxonomy. Dipakai jalur KOL baru di dalam
+#: `transform_chain_job`: asset lain di job yang sama sedang menulis kartu/audiens,
+#: jadi sidik jari tabel-tabel itu bukan urusan (dan bukan tanggung jawab) writer.
+DIRECTORY_FP = ("public.kol_categories", "public.kol_attribute", "public.agency_kol_accounts",
+                "public.kol_social_account")
+
+
+def snapshot(cur, full=FULL_FP) -> dict:
+    snap = {t: _fp(cur, t) for t in full}
     for t, excl in PARTIAL_FP.items():
         cols = _cols(cur, t, excl)
         snap[t + " (non-classifier columns)"] = _fp(cur, t, "row(" + ", ".join(f't."{c}"' for c in cols) + ")::text")
@@ -340,13 +415,22 @@ def snapshot(cur) -> dict:
     return snap
 
 
+def snapshot_directory(cur) -> dict:
+    return snapshot(cur, DIRECTORY_FP)
+
+
 FP_KEYS_EXCLUDED = set(SQL_COUNTS)
 
 
 def guards(before: dict, after: dict, n_planned: int, n_done: int, n_left: int,
-           expect_active: int = EXPECT_ACTIVE) -> list[str]:
+           expect_active: int | None = EXPECT_ACTIVE) -> list[str]:
+    """Roster tidak boleh berubah oleh writer: jumlah aktif sebelum == sesudah, dan
+    sidik jari kolom non-classifier `kol_directory` (termasuk directory_status tiap
+    baris) identik. `expect_active` (opsional) menambah pemeriksaan angka pasti."""
     bad = []
-    if not (before["active"] == after["active"] == expect_active):
+    if before["active"] != after["active"]:
+        bad.append(f"active KOL berubah selama transaksi: {before['active']} -> {after['active']}")
+    elif expect_active is not None and after["active"] != expect_active:
         bad.append(f"active KOL {before['active']} -> {after['active']}, expected {expect_active}")
     for k in before:
         if k not in FP_KEYS_EXCLUDED and before[k] != after.get(k):
@@ -398,7 +482,8 @@ def execute_plan(cur, p: Plan) -> int:
     return done
 
 
-def apply(conn, replan, p: Plan, *, commit: bool, snap=snapshot, check=guards) -> tuple[int, list[str], bool]:
+def apply(conn, replan, p: Plan, *, commit: bool, snap=snapshot, check=guards,
+          expect_active: int | None = None) -> tuple[int, list[str], bool]:
     """Satu transaksi: snapshot -> write -> snapshot -> re-plan -> guard -> COMMIT/ROLLBACK.
     `replan(cur)` menghitung ulang plan dari state DB di transaksi yang sama.
     Tanpa commit=True selalu ROLLBACK. Error apa pun -> ROLLBACK lalu dilempar ulang."""
@@ -408,7 +493,10 @@ def apply(conn, replan, p: Plan, *, commit: bool, snap=snapshot, check=guards) -
             done = execute_plan(cur, p)
             after = snap(cur)
             left = replan(cur).n_changes
-        problems = check(before, after, p.n_changes, done, left)
+        if expect_active is not None:
+            problems = check(before, after, p.n_changes, done, left, expect_active=expect_active)
+        else:
+            problems = check(before, after, p.n_changes, done, left)
         if problems or not commit:
             conn.rollback()
             return done, problems, False
@@ -437,7 +525,8 @@ def print_plan(p: Plan, n: int) -> None:
     print(f"\ncandidate writes: {p.n_changes}  (kol_directory.inferred_* {len(p.kd_updates)}, "
           f"kol_attribute_map insert {len(p.map_inserts)} / update {len(p.map_updates)} / delete {len(p.map_deletes)}; "
           f"audience: 0 -- dibaca dari feature/L2 existing)")
-    print(f"unchanged: {dict(p.unchanged)} | cleared: {dict(p.cleared)} | skipped curated: {dict(p.skipped_curated)}")
+    print(f"unchanged: {dict(p.unchanged)} | cleared: {dict(p.cleared)} | skipped curated: {dict(p.skipped_curated)}"
+          f" | skipped existing (additive): {dict(p.skipped_existing)}")
     print(f"invalid taxonomy / parent-child / audience: {len(p.invalid)}")
     for kid, x in p.invalid[:10]:
         print("   ", kid, x)
@@ -637,7 +726,15 @@ def main() -> int:
                     help="l1 = L1 + roster + card; l1+l0raw = + businessCategoryName/latestPosts "
                          "yang sudah ada di l0_raw.ig_profile_apify (tanpa scraping)")
     ap.add_argument("--out", default="output/creator_classification_write_plan.json")
+    ap.add_argument("--kol-id", action="append", default=None, metavar="UUID",
+                    help="batasi ke kol_directory.id ini (boleh diulang)")
+    ap.add_argument("--only-unclassified", action="store_true",
+                    help="hanya KOL aktif tanpa category; additive (tidak menimpa/mengosongkan/menghapus)")
+    ap.add_argument("--expect-active", type=int, default=None,
+                    help="guard tambahan: jumlah KOL aktif harus persis N (default: dinamis)")
     args = ap.parse_args()
+    if args.verify and (args.kol_id or args.only_unclassified):
+        ap.error("--verify selalu atas seluruh KOL aktif; jangan digabung dengan --kol-id/--only-unclassified")
     prototype = EVIDENCE_MODES[args.evidence]
     tahun = date.today().year
     conn = psycopg2.connect(connect_timeout=10, **load_config().postgres.as_connect_kwargs())
@@ -653,10 +750,17 @@ def main() -> int:
             before = snapshot(cur) if not write else None
             if write:   # gagal cepat kalau ada transaksi lain yang memegang lock tabel target
                 cur.execute("SET LOCAL lock_timeout = '15s'")
-        tax, rows, results, attr_ids = load_inputs(conn, prototype, tahun)
+        additive = args.only_unclassified
+        kol_ids = args.kol_id
+        if additive:
+            with conn.cursor() as cur:
+                target = unclassified_ids(cur)
+            kol_ids = target if kol_ids is None else [k for k in kol_ids if k in set(target)]
+            print(f"only-unclassified: {len(kol_ids)} KOL target")
+        tax, rows, results, attr_ids = load_inputs(conn, prototype, tahun, kol_ids=kol_ids)
         with conn.cursor() as cur:
             state = read_state(cur)
-        p = plan(tax, results, state, attr_ids, args.evidence)
+        p = plan(tax, results, state, attr_ids, args.evidence, additive=additive)
         print(f"evidence mode: {args.evidence}")
         print_plan(p, len(rows))
         print_examples(rows, results)
@@ -680,8 +784,9 @@ def main() -> int:
             return 1
 
         def replan(cur):
-            return plan(tax, results, read_state(cur), attr_ids, args.evidence)
-        done, problems, committed = apply(conn, replan, p, commit=args.commit)
+            return plan(tax, results, read_state(cur), attr_ids, args.evidence, additive=additive)
+        done, problems, committed = apply(conn, replan, p, commit=args.commit,
+                                          expect_active=args.expect_active)
         print(f"\nwritten in transaction: {done} / candidate {p.n_changes}")
         for x in problems:
             print("  GUARD FAILED:", x)

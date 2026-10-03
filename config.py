@@ -113,8 +113,14 @@ class Config:
     output_dir: Path
 
 
+def _env(name: str) -> str | None:
+    """`PG_*` boleh ditulis `PG_*_KOL` di .env (kredensial DB `kol` dipisah dari DB
+    lain). Nama tanpa akhiran tetap menang kalau dua-duanya ada."""
+    return os.getenv(name) or (os.getenv(name + "_KOL") if name.startswith("PG_") else None)
+
+
 def _require(name: str) -> str:
-    value = os.getenv(name)
+    value = _env(name)
     if not value:
         raise ConfigError(
             f"{name} belum diset. Tambahkan ke {PROJECT_ROOT / '.env'} "
@@ -133,7 +139,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def load_config() -> Config:
     postgres = PostgresConfig(
         host=_require("PG_HOST"),
-        port=os.getenv("PG_PORT", "5432"),
+        port=_env("PG_PORT") or "5432",
         database=_require("PG_DB"),
         user=_require("PG_USER"),
         password=_require("PG_PASSWORD"),
