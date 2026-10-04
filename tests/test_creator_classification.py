@@ -15,12 +15,12 @@ from creator_classification import CreatorInput, Post
 
 TAHUN = 2026
 
-#: 14 kategori canonical, nama persis seperti di DB `kol`.
+#: 14 kategori canonical + Animal Lovers, nama persis seperti di DB `kol`.
 CATEGORIES = {"BEA": "Beauty", "ENT": "Entertainment", "FAS": "Fashion", "FIT": "Fitness",
               "FOD": "Food", "LIF": "Lifestyle", "TRV": "Travel", "GAM": "Gaming",
               "AUT": "Automotive", "EDU": "Education", "FIN": "Finance", "HNL": "Home & Living",
-              "PAR": "Parenting", "TEC": "Tech"}
-#: 42 subkategori: kode -> (nama DB, kode induk).
+              "PAR": "Parenting", "TEC": "Tech", "ANM": "Animal Lovers"}
+#: 43 subkategori: kode -> (nama DB, kode induk).
 SUBCATEGORIES = {
     "BEA.HAR": ("Haircare", "BEA"), "BEA.MKP": ("Makeup", "BEA"), "BEA.SKN": ("Skincare", "BEA"),
     "ENT.COM": ("Comedy", "ENT"), "ENT.FLM": ("Film & Series", "ENT"), "ENT.MUS": ("Music", "ENT"),
@@ -42,9 +42,10 @@ SUBCATEGORIES = {
     "PAR.PRG": ("Pregnancy & Newborn", "PAR"),
     "TEC.AIP": ("AI & Productivity", "TEC"), "TEC.GDG": ("Gadget Review", "TEC"),
     "TEC.SAAS": ("Software & SaaS", "TEC"),
+    "ANM.PET": ("Pet Content", "ANM"),
 }
 #: Baris legacy / segmen audiens (level='category', tanpa kode) yang ada di DB.
-LEGACY = ("Foodies", "Cooking", "Dance", "Sports", "Home Decor", "Medical", "Animal Lovers",
+LEGACY = ("Foodies", "Cooking", "Dance", "Sports", "Home Decor", "Medical",
           "Gen Z", "Moms")
 STYLES = [
     "communication_style.educational", "communication_style.storytelling",
@@ -104,10 +105,37 @@ def test_taxonomy_menolak_subkategori_yang_induknya_bukan_canonical():
         C.Taxonomy.from_rows(rows, ATTRS)
 
 
-def test_taxonomy_hanya_14_canonical_dan_label_legacy_bukan_target(tax):
+def test_taxonomy_hanya_canonical_dan_label_legacy_bukan_target(tax):
     assert set(L.CATEGORY_TARGETS) == set(CATEGORIES)
-    for name in ("Medical", "Animal Lovers", "Foodies", "Gen Z", "Moms"):
+    for name in ("Medical", "Foodies", "Gen Z", "Moms"):
         assert tax.category_by_name[name].code not in L.CATEGORY_TARGETS
+
+
+def test_kreator_hewan_peliharaan_masuk_animal_lovers_pet_content(tax):
+    """Kasus @ibusambung: bio menyebut 'Lifestyle' sekali, kontennya anak anjing."""
+    inp = CreatorInput("k-pet", bio="Kandang kami di Bali | Pet Drama - Lifestyle - Daily Chaos",
+                       posts=posts("Mambo anakmu! #mambo #puppy", "Jujur ya jujur .... #mambo #puppy",
+                                   "hapus kotoran anak anjing dan babi"))
+    res = C.classify(inp, tax, TAHUN)
+    assert res["category"].value == "Animal Lovers"
+    assert res["subcategory"].value == "Pet Content"
+    assert res["subcategory"].ref.parent_id == res["category"].ref.id
+    assert C.validate(res, tax) == []
+
+
+def test_label_roster_animal_lovers_tetap_diabaikan(tax):
+    inp = CreatorInput("k-ros", bio="gym fitness workout", roster_categories=("Animal Lovers",))
+    res = cat_of(inp, tax)
+    assert res.value == "Fitness" and res.source == "inference"
+
+
+def test_umpatan_anjing_dan_kata_lifestyle_tidak_menjadi_animal_lovers(tax):
+    inp = CreatorInput("k-lif", bio="Lifestyle | daily vlog",
+                       posts=posts("anjing macet banget hari ini", "anjing capek", "makan hot dog",
+                                   "beli cat tembok baru", "ganti cat rumah"))
+    res = C.classify(inp, tax, TAHUN)
+    assert res["category"].value == "Lifestyle"
+    assert res["subcategory"].value == "Daily Vlog"
 
 
 def test_children_dari_parent_id_bukan_prefix_kode(tax):

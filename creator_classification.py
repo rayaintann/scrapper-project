@@ -46,7 +46,7 @@ dan subkategori adalah DUA hasil terpisah, masing-masing satu baris tabel itu
 (`TaxRef`: id, name, code, level, parent_id):
 
     category     baris level='category', parent_id NULL, salah satu dari
-                 14 kode canonical (CATEGORY_TARGETS)
+                 kode canonical di CATEGORY_TARGETS (14 + Animal Lovers)
     subcategory  baris level='sub_category' dengan parent_id == category.id,
                  atau None kalau buktinya tidak cukup
 
@@ -472,12 +472,12 @@ def _roster_targets(inp: CreatorInput, tax: Taxonomy) -> tuple[set[str], list[st
         row = tax.category_by_name.get(name)
         if name in L.AUDIENCE_SEGMENT_CATEGORIES:
             dropped.append(f"{name} (segmen audiens)")
+        elif name in L.ROSTER_UNMAPPED:
+            dropped.append(f"{name} (legacy, tidak ada padanan canonical)")
         elif row is not None and row.code in L.CATEGORY_TARGETS:
             targets.add(row.code)
         elif name in L.ROSTER_LEGACY_TO_CODE:
             targets.add(L.ROSTER_LEGACY_TO_CODE[name])
-        elif name in L.ROSTER_UNMAPPED:
-            dropped.append(f"{name} (legacy, tidak ada padanan canonical)")
         else:
             dropped.append(f"{name} (tidak dikenal)")
     return targets, dropped

@@ -116,21 +116,25 @@ BUSINESS_CATEGORY_TO_CATEGORY: dict[str, str] = {
     "Education": "EDU", "Children & Parenting": "PAR",
     "Home Services": "HNL", "Automotive Body Shop": "AUT",
     # Doctor / Dentist / Nutritionist / OBGYN / "Medical & health" / Zoo sengaja
-    # TIDAK dipetakan ke kategori: Medical dan Animal Lovers bukan kategori
-    # canonical. Peran Professional/Business-nya tetap dibaca BUSINESS_CATEGORY_ROLE.
+    # TIDAK dipetakan ke kategori: Medical bukan kategori canonical, dan kebun
+    # binatang bukan kreator konten hewan peliharaan. Peran Professional/Business-nya
+    # tetap dibaca BUSINESS_CATEGORY_ROLE.
 }
 
 # ===========================================================================
 # KATEGORI -- target = nama baris kol_categories (level 'category')
 # ===========================================================================
-#: Kategori yang boleh jadi hasil classifier: HANYA 14 kategori canonical --
-#: baris `level='category'`, `parent_id IS NULL`, dengan `code`. `Taxonomy`
-#: memverifikasi ke DB bahwa ke-14 kode ini ada dan berbentuk demikian.
+#: Kategori yang boleh jadi hasil classifier: 14 kategori canonical + Animal
+#: Lovers (ANM) -- baris `level='category'`, `parent_id IS NULL`, dengan `code`.
+#: `Taxonomy` memverifikasi ke DB bahwa semua kode ini ada dan berbentuk demikian.
 #: Label legacy roster (Foodies, Medical, ...) dan segmen audiens (Gen Z, Moms)
 #: TIDAK PERNAH menjadi hasil.
+#: ANM ditambahkan 2026-10-04: kreator hewan peliharaan dari "Add New KOL" jatuh
+#: ke Lifestyle tanpa subkategori, padahal baris ANM / ANM.PET sudah ada di taxonomy.
 CATEGORY_TARGETS = (
     "BEA", "ENT", "FAS", "FIT", "FOD", "LIF", "TRV",
     "GAM", "AUT", "EDU", "FIN", "HNL", "PAR", "TEC",
+    "ANM",
 )
 
 #: Segmen audiens yang tidak boleh menjadi kategori kreator.
@@ -154,10 +158,22 @@ ROSTER_LEGACY_TO_CODE: dict[str, str] = {
 }
 
 #: Label legacy tanpa padanan canonical: diabaikan sebagai kategori (UNMAPPED).
+#: Diperiksa SEBELUM kode canonical: label roster "Animal Lovers" tetap diabaikan
+#: walau barisnya ber-kode ANM. ANM hanya jadi hasil lewat bukti konten.
 ROSTER_UNMAPPED = frozenset({"Medical", "Spirituality and religion", "Animal Lovers",
                              "Environmentalism and sustainability"})
 
+#: Istilah hewan peliharaan, dipakai kategori ANM dan satu-satunya anaknya ANM.PET.
+#: "anjing", "cat", "dog" sendirian SENGAJA tidak ada: "anjing" umpatan sehari-hari,
+#: "cat" = cat tembok, "dog" muncul di "hot dog".
+PET_TERMS: tuple[str, ...] = ("pet", "pets", "pet lover", "pet lovers", "petlover", "pet content",
+                         "puppy", "puppies", "kitten", "kucing", "anak anjing", "anabul",
+                         "anak bulu", "hewan peliharaan", "pecinta hewan", "pecinta kucing",
+                         "pecinta anjing", "animal lover", "animal lovers", "cat lover",
+                         "dog lover", "cat mom", "dog mom", "pawrent")
+
 CATEGORY_LEXICON: dict[str, tuple[str, ...]] = {
+    "ANM": PET_TERMS,
     "BEA": ("makeup", "make up", "skincare", "skin care", "kosmetik", "cosmetics",
                "mua", "beauty", "kecantikan", "lipstik", "lipstick", "serum",
                "sunscreen", "haircare", "hair care", "beauty enthusiast", "beautyvlogger",
@@ -305,6 +321,7 @@ SUBCATEGORY_LEXICON: dict[str, tuple[str, ...]] = {
     "TEC.GDG": ("gadget", "review gadget", "unboxing", "smartphone", "laptop",
                 "tech reviewer", "iphone", "android"),
     "TEC.SAAS": ("software", "saas", "aplikasi", "developer", "programmer", "coding", "web app"),
+    "ANM.PET": PET_TERMS,
 }
 
 # ===========================================================================
