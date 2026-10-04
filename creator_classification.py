@@ -610,6 +610,21 @@ def _classify_category_primary(inp: CreatorInput, tax: Taxonomy) -> Attribute:
     return _resolve(res, tax)
 
 
+def declared_subcategory(declared: str | None, category_code: str | None,
+                         lex: dict[str, tuple[str, ...]]) -> str | None:
+    """Declared category -> kode subkategori, diturunkan dari leksikon yang SUDAH ADA.
+
+    Tidak ada tabel pemetaan kedua: teks label ("Actor", "Musician/band") dicocokkan
+    ke istilah subkategori seperti bio. Hasil hanya ada kalau label itu memang
+    dipetakan `BUSINESS_CATEGORY_TO_CATEGORY` ke kategori TERPILIH (bukti tidak bisa
+    menyeberang ke induk lain) dan TEPAT SATU subkategori anaknya yang cocok."""
+    if not declared or category_code is None or L.BUSINESS_CATEGORY_TO_CATEGORY.get(declared) != category_code:
+        return None
+    text = _norm(declared)
+    hit = [code for code, terms in lex.items() if _hits(text, terms)]
+    return hit[0] if len(hit) == 1 else None
+
+
 def classify_subcategory(inp: CreatorInput, category: Attribute, tax: Taxonomy) -> Attribute:
     """Kandidat HANYA baris sub_category dengan parent_id == category.id."""
     if not category.known or category.ref is None:
@@ -618,7 +633,11 @@ def classify_subcategory(inp: CreatorInput, category: Attribute, tax: Taxonomy) 
     if not children:
         return _unknown(f"subkategori: kategori {category.value} tidak punya subkategori di taxonomy")
     lex = {c.code: L.SUBCATEGORY_LEXICON[c.code] for c in children if c.code in L.SUBCATEGORY_LEXICON}
-    res = _resolve(_decide(_collect(inp, lex), f"subkategori {category.value}", show=tax.name_of), tax)
+    ev = _collect(inp, lex)
+    code = declared_subcategory(inp.declared_category, category.ref.code, lex)
+    if code:
+        ev.setdefault(code, []).insert(0, Evidence(SOURCE_DECLARED, code, W_DECLARED, inp.declared_category))
+    res = _resolve(_decide(ev, f"subkategori {category.value}", show=tax.name_of), tax)
     if res.known and res.ref.parent_id != category.ref.id:   # pragma: no cover
         raise AssertionError("subkategori di luar induknya")  # dijaga oleh `children`
     return res

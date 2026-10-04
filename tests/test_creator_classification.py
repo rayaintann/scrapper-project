@@ -138,6 +138,105 @@ def test_umpatan_anjing_dan_kata_lifestyle_tidak_menjadi_animal_lovers(tax):
     assert res["subcategory"].value == "Daily Vlog"
 
 
+def test_declared_actor_menjadi_entertainment_film_series(tax):
+    """Kasus @nikitawillyofficial94: bio hanya mention, label akun IG = Actor."""
+    inp = CreatorInput("k-act", bio="@brand.a @brand.b", declared_category="Actor",
+                       posts=posts("liburan keluarga", "ulang tahun anak"))
+    res = C.classify(inp, tax, TAHUN)
+    assert res["category"].value == "Entertainment"
+    sub = res["subcategory"]
+    assert sub.value == "Film & Series" and sub.confidence == "medium"
+    assert [(e.source, e.detail) for e in sub.evidence] == [("declared_category", "Actor")]
+    assert C.validate(res, tax) == []
+
+
+def test_aktor_dari_bio_tetap_film_series_tanpa_declared(tax):
+    res = C.classify(CreatorInput("k-akt", bio="Aktor | pemain film"), tax, TAHUN)
+    assert res["category"].value == "Entertainment"
+    assert res["subcategory"].value == "Film & Series"
+    assert {e.source for e in res["subcategory"].evidence} == {"bio"}
+
+
+def test_declared_actor_tidak_memaksa_subkategori_di_luar_induknya(tax):
+    # Roster (kurasi) menetapkan Beauty: label Actor tidak boleh membawa Film & Series.
+    inp = CreatorInput("k-ros2", declared_category="Actor", roster_categories=("Beauty",))
+    res = C.classify(inp, tax, TAHUN)
+    assert res["category"].value == "Beauty" and not res["subcategory"].known
+    assert C.validate(res, tax) == []
+
+
+def test_bukti_lemah_tetap_unknown_tanpa_declared(tax):
+    res = C.classify(CreatorInput("k-weak", bio="halo", posts=posts("nonton film bareng")), tax, TAHUN)
+    assert not res["category"].known and not res["subcategory"].known
+
+
+#: SELURUH label di BUSINESS_CATEGORY_TO_CATEGORY -> subkategori yang diturunkan dari
+#: leksikon existing (None = label hanya membawa kategori). Dipaku di sini supaya
+#: perubahan leksikon yang menggeser turunan ini terlihat sebagai test gagal.
+DECLARED_SUBCATEGORY = {
+    "Beauty, cosmetic & personal care": None, "Health/beauty": None,
+    "Makeup Artist": "Makeup", "Dermatologist": None,
+    "Fashion Model": None, "Model": None, "Design & fashion": None,
+    "Athlete": None, "Coach": None, "Gym/Physical Fitness Center": "Gym & Strength",
+    "Chef": None, "Food & beverage": None, "Donut Shop": None,
+    "Gaming video creator": None,
+    "Actor": "Film & Series", "Comedian": "Comedy", "Musician": "Music",
+    "Musician/band": "Music", "Singer": "Music", "Bass Guitarist": "Music", "Artist": None,
+    "Education": None, "Children & Parenting": None,
+    "Home Services": None, "Automotive Body Shop": None,
+}
+
+
+def test_tabel_declared_subcategory_mencakup_semua_label_berkategori():
+    assert set(DECLARED_SUBCATEGORY) == set(L.BUSINESS_CATEGORY_TO_CATEGORY)
+
+
+@pytest.mark.parametrize("label,sub_name", sorted(DECLARED_SUBCATEGORY.items()))
+def test_declared_label_diteruskan_ke_subkategori_bila_tidak_ambigu(tax, label, sub_name):
+    inp = CreatorInput("k-decl", declared_category=label)
+    res = C.classify(inp, tax, TAHUN)
+    cat, sub = res["category"], res["subcategory"]
+    assert cat.ref.code == L.BUSINESS_CATEGORY_TO_CATEGORY[label]
+    assert sub.value == sub_name                       # None: subkategori tidak dipaksa
+    if sub_name:
+        assert sub.ref.level == "sub_category" and sub.ref.parent_id == cat.ref.id
+        assert [(e.source, e.detail) for e in sub.evidence] == [("declared_category", label)]
+    assert C.validate(res, tax) == []                  # taxonomy validation
+    assert C.classify(inp, tax, TAHUN) == res          # idempoten
+
+
+@pytest.mark.parametrize("label", sorted(k for k, v in DECLARED_SUBCATEGORY.items() if v))
+def test_declared_label_tidak_menyeberang_ke_induk_lain(tax, label):
+    # Roster (kurasi) menetapkan induk lain: roster menang, subkategori tidak dipaksa.
+    other = "Travel"
+    res = C.classify(CreatorInput("k-x", declared_category=label, roster_categories=(other,)), tax, TAHUN)
+    assert res["category"].value == other and res["category"].source == "roster"
+    assert not res["subcategory"].known
+    assert C.validate(res, tax) == []
+
+
+@pytest.mark.parametrize("label", sorted(set(L.BUSINESS_CATEGORY_ROLE) - set(L.BUSINESS_CATEGORY_TO_CATEGORY)))
+def test_declared_label_tanpa_kategori_tetap_unknown(tax, label):
+    res = C.classify(CreatorInput("k-u", declared_category=label), tax, TAHUN)
+    assert not res["category"].known and not res["subcategory"].known
+
+
+def test_declared_subcategory_ambigu_atau_salah_induk_tidak_memilih():
+    lex = {"ENT.FLM": ("actor",), "ENT.COM": ("actor", "comedian")}
+    assert C.declared_subcategory("Actor", "ENT", lex) is None            # dua anak cocok
+    assert C.declared_subcategory("Comedian", "ENT", lex) == "ENT.COM"
+    assert C.declared_subcategory("Comedian", "BEA", lex) is None         # bukan induk label ini
+    assert C.declared_subcategory("Public figure", "ENT", lex) is None    # label tanpa kategori
+    assert C.declared_subcategory(None, "ENT", lex) is None
+
+
+def test_declared_dan_bio_berbeda_subkategori_tidak_dipaksa(tax):
+    # Label Actor (3.0) vs bio komedi (2.5): selisih < 1.0 -> Unknown, bukan tebakan.
+    inp = CreatorInput("k-conf", declared_category="Actor", bio="komedian | stand up comedy")
+    res = C.classify(inp, tax, TAHUN)
+    assert res["category"].value == "Entertainment" and not res["subcategory"].known
+
+
 def test_children_dari_parent_id_bukan_prefix_kode(tax):
     food = tax.category("FOD")
     assert [c.name for c in tax.children(food.id)] == ["Coffee & Beverage", "Culinary Review",
