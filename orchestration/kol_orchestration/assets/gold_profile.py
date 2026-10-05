@@ -750,4 +750,42 @@ def kol_profile_card(postgres: PostgresResource) -> Output:
     return _jalankan(postgres)
 
 
-gold_profile_assets = [kol_profile_card]
+# KARTU DISEGARKAN SETELAH AUDIENS SELESAI
+# ----------------------------------------
+# `kol_profile_card` tidak menunggu `audience_feature` -- dan memang tidak boleh:
+# rantai follower jauh lebih lambat, dan Category KOL baru (`creator_classification`)
+# menunggu kartu. Akibatnya untuk KOL dari "Add New KOL" kartu selalu terbentuk
+# LEBIH DULU, saat baris `feature.*_audience_analysis`-nya belum ada, sehingga
+# female_pct/male_pct, audience_quality_* dan audience_interest_* tersimpan NULL
+# sampai run berikutnya kebetulan terpicu (terukur 5 Oktober: kartu 14:22,
+# feature audiens 14:28).
+#
+# Asset ini menutup celah itu tanpa menambah dependensi ke kartu: UPSERT yang
+# SAMA dijalankan sekali lagi begitu `audience_feature` selesai. Penjaga
+# `IS DISTINCT FROM` membuat baris yang tidak berubah tidak disentuh, jadi yang
+# tertulis hanya kartu yang kolom audiensnya baru terisi.
+#
+# `creator_age` dan `creator_gender` ikut jadi dependensi HANYA untuk urutan:
+# keduanya meng-UPDATE tabel kartu yang sama, dan UPSERT ini mengunci setiap baris
+# yang bentrok (termasuk yang akhirnya tidak diubah). Dijalankan sesudah keduanya,
+# tidak ada dua penulis kartu yang saling menunggu kunci.
+@asset(
+    name="kol_profile_card_audience",
+    group_name=GROUP,
+    deps=[AssetKey("kol_profile_card"), AssetKey("audience_feature"),
+          AssetKey("creator_age"), AssetKey("creator_gender")],
+    kinds={"postgres"},
+    description=(
+        "l2_gold.kol_profile_card — UPSERT yang sama dengan kol_profile_card, "
+        "dijalankan ulang setelah audience_feature selesai supaya kolom audiens "
+        "di kartu (female_pct, male_pct, gender_known_pct, audience_quality_*, "
+        "audience_interest_*) tidak tertinggal NULL untuk KOL yang follower-nya "
+        "baru masuk di run yang sama. Tidak ada rumus baru; baris yang tidak "
+        "berubah tidak disentuh."
+    ),
+)
+def kol_profile_card_audience(postgres: PostgresResource) -> Output:
+    return _jalankan(postgres)
+
+
+gold_profile_assets = [kol_profile_card, kol_profile_card_audience]
