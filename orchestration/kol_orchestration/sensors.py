@@ -103,7 +103,11 @@ CURSOR_VERSION = 1
 
 #: Interval MINIMUM antar-pengecekan, bukan jadwal. Sensor tidak menghasilkan
 #: run kalau sidik jari tidak berubah, seberapa sering pun ia dievaluasi.
-MINIMUM_INTERVAL_SECONDS = 60
+#:
+#: 30 detik, sama dengan dua sensor Brand Match. Satu tick hanya satu query
+#: sidik jari, dan jeda ini langsung menjadi waktu tunggu "Add New KOL" sebelum
+#: rantai transformasinya mulai.
+MINIMUM_INTERVAL_SECONDS = 30
 
 #: Tabel `l0_raw` yang benar-benar jadi sumber `transform_chain_job`.
 #: Urutannya dipertahankan supaya SQL dan cursor deterministik.
