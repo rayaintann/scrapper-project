@@ -75,6 +75,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 # ---------------------------------------------------------------------------
 # Kamus nama -> gender
@@ -688,11 +689,23 @@ def _token(*teks: str | None) -> list[str]:
     return keluar
 
 
+@lru_cache(maxsize=None)
+def _pola_kata(kata: str) -> re.Pattern:
+    """Pola kata-utuh untuk satu kata kamus, dikompilasi SEKALI.
+
+    `re.search(pola_string, ...)` hanya mengandalkan cache internal `re`, yang
+    dibatasi beberapa ratus pola. Kamus di modul ini jauh lebih besar dari itu,
+    jadi cache-nya terus terusir dan hampir setiap panggilan mengompilasi ulang
+    -- terukur ~95% waktu `analisis_follower`. Polanya sendiri tidak berubah.
+    """
+    return re.compile(rf"\b{re.escape(kata)}\b")
+
+
 def _cocok_kata(haystack: str, kata: str) -> bool:
     """Cocok sebagai kata utuh, bukan substring."""
     if " " in kata:
         return kata in haystack
-    return re.search(rf"\b{re.escape(kata)}\b", haystack) is not None
+    return _pola_kata(kata).search(haystack) is not None
 
 
 @dataclass

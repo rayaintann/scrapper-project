@@ -124,6 +124,10 @@ TRANSFORM_ASSETS = (
     "unified_follower",
     "audience_feature",
     "audience_gold",
+    # Kartu profil disegarkan setelah audience_feature: kartu dibangun lebih dulu
+    # (Category KOL baru menunggunya), jadi kolom audiensnya masih NULL untuk akun
+    # yang follower-nya baru masuk di run yang sama. Lihat gold_profile.py.
+    "kol_profile_card_audience",
     # --- dua fitur UMUR, ditambahkan bersama migration 042 ----------------
     # Sengaja disebut terpisah supaya terlihat bahwa keduanya BUKAN satu
     # fitur: `audience_age_measured` mengisi umur AUDIENS dari jalur Insights

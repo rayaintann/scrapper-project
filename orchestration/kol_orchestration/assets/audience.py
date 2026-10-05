@@ -116,6 +116,7 @@ from datetime import date
 from pathlib import Path
 
 from dagster import AssetKey, MetadataValue, Output, asset
+from psycopg2.extras import execute_values
 
 from kol_orchestration.resources import PostgresResource
 
@@ -171,6 +172,101 @@ SQL_FOLLOWER = """
     JOIN public.platforms pl ON pl.id = f.platform_id
     WHERE f.social_account_id IS NOT NULL
 """
+
+# --- UPSERT L2, satu pernyataan per TABEL ------------------------------------
+#
+# `_tulis_gold` menghitung ulang seluruh (akun, platform, tanggal) tiap run, dan
+# dulu mengirim satu INSERT per dimensi -- ~2.100 round trip ke database untuk
+# 142 (akun, tanggal), hampir semuanya baris yang tidak berubah. Barisnya
+# sekarang dikumpulkan lalu dikirim lewat `execute_values`: SQL, kunci konflik
+# dan penjaga `IS DISTINCT FROM`-nya sama persis, hanya jumlah perjalanannya
+# yang turun.
+#
+# Urutannya aman ditukar dengan DELETE baris basi: DELETE hanya menyentuh kunci
+# yang TIDAK ada di hasil baru, UPSERT hanya kunci yang ADA -- dua himpunan baris
+# yang tidak beririsan, di dalam satu transaksi yang sama.
+_HALAMAN_UPSERT = 500
+
+SQL_UPSERT_DEMOGRAFI_GENDER = """
+    INSERT INTO l2_gold.audience_demographics_daily (
+        social_account_id, platform, audience_date,
+        audience_type, dimension_key, audience_count,
+        confidence, created_at, updated_at)
+    VALUES %s
+    ON CONFLICT (social_account_id, platform, audience_date,
+                 audience_type, dimension_key)
+    DO UPDATE SET audience_count = EXCLUDED.audience_count,
+                  confidence     = EXCLUDED.confidence,
+                  updated_at     = now()
+    WHERE audience_demographics_daily.audience_count
+              IS DISTINCT FROM EXCLUDED.audience_count
+       OR audience_demographics_daily.confidence
+              IS DISTINCT FROM EXCLUDED.confidence
+"""
+_BARIS_GENDER = "(%s,%s,%s,'gender',%s,%s,%s,now(),now())"
+
+# Baris `measured` (jalur A) tidak pernah ditimpa -- lihat komentar di `_tulis_gold`.
+SQL_UPSERT_DEMOGRAFI_UMUR = f"""
+    INSERT INTO l2_gold.audience_demographics_daily (
+        social_account_id, platform, audience_date,
+        audience_type, dimension_key, audience_count,
+        confidence, created_at, updated_at)
+    VALUES %s
+    ON CONFLICT (social_account_id, platform, audience_date,
+                 audience_type, dimension_key)
+    DO UPDATE SET audience_count = EXCLUDED.audience_count,
+                  confidence     = EXCLUDED.confidence,
+                  updated_at     = now()
+    WHERE audience_demographics_daily.confidence
+              IS DISTINCT FROM '{CONF_TERUKUR}'
+      AND (audience_demographics_daily.audience_count
+              IS DISTINCT FROM EXCLUDED.audience_count
+        OR audience_demographics_daily.confidence
+              IS DISTINCT FROM EXCLUDED.confidence)
+"""
+_BARIS_UMUR = "(%s,%s,%s,'age',%s,%s,%s,now(),now())"
+
+SQL_UPSERT_GEO = """
+    INSERT INTO l2_gold.audience_geo_daily (
+        social_account_id, platform, audience_date,
+        geo_level, geo_key, audience_count,
+        confidence, created_at, updated_at)
+    VALUES %s
+    ON CONFLICT (social_account_id, platform,
+                 audience_date, geo_level, geo_key)
+    DO UPDATE SET audience_count = EXCLUDED.audience_count,
+                  confidence     = EXCLUDED.confidence,
+                  updated_at     = now()
+    WHERE audience_geo_daily.audience_count
+              IS DISTINCT FROM EXCLUDED.audience_count
+       OR audience_geo_daily.confidence
+              IS DISTINCT FROM EXCLUDED.confidence
+"""
+_BARIS_GEO = "(%s,%s,%s,%s,%s,%s,%s,now(),now())"
+
+SQL_UPSERT_INTEREST = """
+    INSERT INTO l2_gold.audience_interest_daily (
+        social_account_id, platform, audience_date,
+        interest_key, audience_count, confidence,
+        created_at, updated_at)
+    VALUES %s
+    ON CONFLICT (social_account_id, platform, audience_date,
+                 interest_key)
+    DO UPDATE SET audience_count = EXCLUDED.audience_count,
+                  confidence     = EXCLUDED.confidence,
+                  updated_at     = now()
+    WHERE audience_interest_daily.audience_count
+              IS DISTINCT FROM EXCLUDED.audience_count
+       OR audience_interest_daily.confidence
+              IS DISTINCT FROM EXCLUDED.confidence
+"""
+_BARIS_INTEREST = "(%s,%s,%s,%s,%s,%s,now(),now())"
+
+
+def _upsert_banyak(cur, sql: str, templat: str, baris: list[tuple]) -> None:
+    """Kirim seluruh `baris` ke satu UPSERT. Daftar kosong tidak mengirim apa pun."""
+    if baris:
+        execute_values(cur, sql, baris, template=templat, page_size=_HALAMAN_UPSERT)
 
 
 def _kunci_confidence(level: str) -> str:
@@ -603,6 +699,12 @@ def _tulis_gold(postgres: PostgresResource, tahun_acuan: int) -> Output:
             n_demo = n_geo = n_int = n_age = 0
             n_basi = 0
             n_age_tahu = 0
+            # Baris UPSERT dikumpulkan di sini dan dikirim sekali per tabel
+            # setelah loop -- lihat `SQL_UPSERT_*` di atas.
+            baris_gender: list[tuple] = []
+            baris_umur: list[tuple] = []
+            baris_geo: list[tuple] = []
+            baris_interest: list[tuple] = []
 
             for (sid, plat, tgl), baris in per_akun.items():
                 agg = _hitung_per_akun(baris, tahun_acuan)
@@ -658,22 +760,7 @@ def _tulis_gold(postgres: PostgresResource, tahun_acuan: int) -> Output:
                 for kunci, jml in agg["gender"].items():
                     conf = _kunci_confidence(
                         _modus_confidence(agg["gender_conf"].get(kunci, [])))
-                    cur.execute("""
-                        INSERT INTO l2_gold.audience_demographics_daily (
-                            social_account_id, platform, audience_date,
-                            audience_type, dimension_key, audience_count,
-                            confidence, created_at, updated_at)
-                        VALUES (%s,%s,%s,'gender',%s,%s,%s,now(),now())
-                        ON CONFLICT (social_account_id, platform, audience_date,
-                                     audience_type, dimension_key)
-                        DO UPDATE SET audience_count = EXCLUDED.audience_count,
-                                      confidence     = EXCLUDED.confidence,
-                                      updated_at     = now()
-                        WHERE audience_demographics_daily.audience_count
-                                  IS DISTINCT FROM EXCLUDED.audience_count
-                           OR audience_demographics_daily.confidence
-                                  IS DISTINCT FROM EXCLUDED.confidence
-                    """, (sid, plat, tgl, kunci, jml, conf))
+                    baris_gender.append((sid, plat, tgl, kunci, jml, conf))
                     n_demo += 1
 
                 # --- umur (audience_type='age') ---------------------------
@@ -716,24 +803,7 @@ def _tulis_gold(postgres: PostgresResource, tahun_acuan: int) -> Output:
                         continue
                     conf = _kunci_confidence(
                         _modus_confidence(agg["umur_conf"].get(kunci, [])))
-                    cur.execute("""
-                        INSERT INTO l2_gold.audience_demographics_daily (
-                            social_account_id, platform, audience_date,
-                            audience_type, dimension_key, audience_count,
-                            confidence, created_at, updated_at)
-                        VALUES (%s,%s,%s,'age',%s,%s,%s,now(),now())
-                        ON CONFLICT (social_account_id, platform, audience_date,
-                                     audience_type, dimension_key)
-                        DO UPDATE SET audience_count = EXCLUDED.audience_count,
-                                      confidence     = EXCLUDED.confidence,
-                                      updated_at     = now()
-                        WHERE audience_demographics_daily.confidence
-                                  IS DISTINCT FROM %s
-                          AND (audience_demographics_daily.audience_count
-                                  IS DISTINCT FROM EXCLUDED.audience_count
-                            OR audience_demographics_daily.confidence
-                                  IS DISTINCT FROM EXCLUDED.confidence)
-                    """, (sid, plat, tgl, kunci, jml, conf, CONF_TERUKUR))
+                    baris_umur.append((sid, plat, tgl, kunci, jml, conf))
                     n_age += 1
                     if kunci != UMUR_UNKNOWN:
                         n_age_tahu += jml
@@ -755,45 +825,20 @@ def _tulis_gold(postgres: PostgresResource, tahun_acuan: int) -> Output:
                         tingkat = level if level is not None else tingkat_geo(kunci)
                         conf = _kunci_confidence(
                             _modus_confidence(conf_src.get(kunci, [])))
-                        cur.execute("""
-                            INSERT INTO l2_gold.audience_geo_daily (
-                                social_account_id, platform, audience_date,
-                                geo_level, geo_key, audience_count,
-                                confidence, created_at, updated_at)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,now(),now())
-                            ON CONFLICT (social_account_id, platform,
-                                         audience_date, geo_level, geo_key)
-                            DO UPDATE SET audience_count = EXCLUDED.audience_count,
-                                          confidence     = EXCLUDED.confidence,
-                                          updated_at     = now()
-                            WHERE audience_geo_daily.audience_count
-                                      IS DISTINCT FROM EXCLUDED.audience_count
-                               OR audience_geo_daily.confidence
-                                      IS DISTINCT FROM EXCLUDED.confidence
-                        """, (sid, plat, tgl, tingkat, kunci, jml, conf))
+                        baris_geo.append((sid, plat, tgl, tingkat, kunci, jml, conf))
                         n_geo += 1
 
                 # --- interest ---
                 for kunci, jml in agg["minat"].items():
                     conf = _kunci_confidence(
                         _modus_confidence(agg["minat_conf"].get(kunci, [])))
-                    cur.execute("""
-                        INSERT INTO l2_gold.audience_interest_daily (
-                            social_account_id, platform, audience_date,
-                            interest_key, audience_count, confidence,
-                            created_at, updated_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,now(),now())
-                        ON CONFLICT (social_account_id, platform, audience_date,
-                                     interest_key)
-                        DO UPDATE SET audience_count = EXCLUDED.audience_count,
-                                      confidence     = EXCLUDED.confidence,
-                                      updated_at     = now()
-                        WHERE audience_interest_daily.audience_count
-                                  IS DISTINCT FROM EXCLUDED.audience_count
-                           OR audience_interest_daily.confidence
-                                  IS DISTINCT FROM EXCLUDED.confidence
-                    """, (sid, plat, tgl, kunci, jml, conf))
+                    baris_interest.append((sid, plat, tgl, kunci, jml, conf))
                     n_int += 1
+
+            _upsert_banyak(cur, SQL_UPSERT_DEMOGRAFI_GENDER, _BARIS_GENDER, baris_gender)
+            _upsert_banyak(cur, SQL_UPSERT_DEMOGRAFI_UMUR, _BARIS_UMUR, baris_umur)
+            _upsert_banyak(cur, SQL_UPSERT_GEO, _BARIS_GEO, baris_geo)
+            _upsert_banyak(cur, SQL_UPSERT_INTEREST, _BARIS_INTEREST, baris_interest)
 
             for t in ("audience_demographics_daily", "audience_geo_daily",
                       "audience_interest_daily"):
